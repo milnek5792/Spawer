@@ -11,6 +11,9 @@
  *   Milan: panel Start → H100 CHANGE 1→0; LCD START/STOP → H100_START / H100_STOP
  *   Milan DIFFAULT: H13=64 (bit6) ≈ panel „error 6“ — LCD + Serial bits=
  *   Milan: Start/Stop flaky → longer quiet-bus + 2–3 FC16 retries + in-flight lock
+ *   Milan multi-press: NEVER hold write-busy across SCAN6/DIFFAULT/SCANFC —
+ *     Start path = quiet+FC16+short confirm (+1 post-ACK retry) then release busy ASAP;
+ *     SCAN6/DIFFAULT/SCANFC = Serial-only (ops UI)
  *
  * Default (Spawer mód) — quiet Serial + fast H100/temps + DIFF watch:
  *   - Serial quiet: OUT=/IN=/SP=/H100=/H101= [/CHANGE], H7/H12/H13/H20/H23 CHANGE,
@@ -30,17 +33,18 @@
  *       SCAN6 (quiet, jen holding raw=6):
  *         FC03 bloky qty 16 přes 0–2047; TO bloky přeskočit; stop po N× TO v řadě
  *         výpis jen ERR6_ADDR=nnn + Hnnn=6 (jednou na hit)
- *         trigger: po FC16 Start, při H100 1→0, Serial `scan6` / `err6`
+ *         trigger: Serial `scan6` / `err6` (ne auto na UI Start — blokovalo taps)
+ *         optional: při H100 1→0 jen pokud MB_AUTO_SCAN_AFTER_START
  *       SCANFC (fault lit NOW — FC04/01/02) — Serial-only (ne auto; blokuje UI):
  *         FC04 short windows → ERR6_IN= (raw=6); soft LO/HI byte=6
  *         FC01 coils / FC02 DI 0–255 → ON bits; ALARM6_* if index 5/6
  *         Serial `scanfc` / `fcscan` (opakovatelné; skip TO)
- *       DIFFAULT: FC03 (+FC04) key windows before/after → jen DIFF_ADDR= / DIFF_IN=
- *         Serial `diffault` (1.=baseline, 2.=diff); auto před/po FC16
+ *       DIFFAULT: FC03 (+FC04) key windows → jen DIFF_ADDR= / DIFF_IN=
+ *         Serial `diffault` (1.=baseline, 2.=diff) — NE auto před/po UI Start
  *       lehký temp/error scan DEFAULT OFF (ručně `poll`; nehladoví H100)
  *   - START_PROBE FC06: auto OFF; ručně `start` (holding 0–31 kandidáti)
- *   - UI Start / h100 / fc16: pause poll → quiet bus ≥80 ms → FC16 qty1 → echo → settle
- *   - Po FC16: dual confirm + DIFF watch (H13) + SCAN6 + DIFFAULT (SCANFC = Serial)
+ *   - UI Start / h100 / fc16: pause poll → quiet bus ≥200 ms → FC16 qty1 → echo
+ *   - Po FC16: short confirm (early~30 ms + late) + H13; ACK+H100≠expect → 1× FC16 retry
  *   - FC06 na této Spawer pumpě nic nedělá — primary Start = FC16 only
  *   - h100alt: experimentální sekvence (FC16 first; FC06 jen pro srovnání)
  *   - fc16 0|1 / h100fc16: explicitní hodnota; bez arg = toggle jako Start
@@ -90,9 +94,12 @@ static const uint32_t MB_RESPONSE_TIMEOUT_MS = 600;
 static const uint32_t MB_INTER_REQ_MS = 300;  // turnaround 200–500 ms + RX wait
 static const uint32_t MB_START_SETTLE_MS = 300;
 static const uint32_t MB_H100_WRITE_SETTLE_MS = 800; // legacy settle (alt methods)
-static const uint32_t MB_H100_CONFIRM_EARLY_MS = 250; // 1. FC03 po zápisu (chytit val=1 před clear)
-static const uint32_t MB_H100_CONFIRM_LATE_MS = 500;  // 2. sample — auto-clear 1→0
+// Early sample ASAP — Milan pulse 1→0 often gone before 250 ms (multi-press logs).
+static const uint32_t MB_H100_CONFIRM_EARLY_MS = 30;  // 1. FC03 po zápisu (chytit val=1)
+static const uint32_t MB_H100_CONFIRM_LATE_MS = 200;  // 2. sample — auto-clear 1→0
 static const uint32_t MB_H100_POLL_RESUME_MS = 300;   // po confirm hned znovu fast poll
+// Ops UI: do NOT auto SCAN6/DIFFAULT around Start (held write-busy → IGNORED taps).
+static const bool MB_AUTO_SCAN_AFTER_START = false;
 // Milan: Start/Stop often needs several tries — longer quiet + retries
 static const uint32_t MB_QUIET_BUS_MS = 200;         // silent before FC16 (was 80)
 static const uint32_t MB_QUIET_BUS_MAX_MS = 1200;    // max wait for quiet (was 500)
@@ -2011,19 +2018,19 @@ static uint16_t h100ToggleValue() {
 }
 
 static void h100WriteBeginWindow(const char *why) {
-  mbScanBusy = true;  // pause fast FC03 for whole write window
+  mbScanBusy = true;  // pause fast FC03 for short write+confirm only
   // Soft defer only — EndWindow always clears busy + resumes (never forever).
   mbNextFastMs = millis() + MB_H100_CONFIRM_EARLY_MS + MB_H100_CONFIRM_LATE_MS +
                  MB_H100_POLL_RESUME_MS;
   Serial.printf("  poll PAUSED (%s)\n", why ? why : "H100 write");
-  // Pre-Start FC03/FC04 snapshot for post-write DIFFAULT
-  Serial.println(F("DIFFAULT pre-Start baseline…"));
-  captureDiffBaseline(why ? why : "pre-FC16", true);
+  // No DIFFAULT baseline here — long FC03/FC04 sweep held write-busy and
+  // caused H100_START tap IGNORED (busy/debounce) on Milan multi-press.
 }
 
-// One confirm sample: FC03 holding 100–101 + H1; always print; update UI.
+// Fast confirm: FC03 holding 100–101 only (no temps) — keep write-busy short.
 // expectWrite: value we just FC16'd — print "(confirm)" even when unchanged.
-static void h100ConfirmSample(uint16_t expectWrite, const char *phase) {
+// Returns true when read OK.
+static bool h100ConfirmH100Only(uint16_t expectWrite, const char *phase) {
   Serial.printf("H100 confirm %s (expect=%u)…\n", phase ? phase : "?",
                 (unsigned)expectWrite);
 
@@ -2035,52 +2042,77 @@ static void h100ConfirmSample(uint16_t expectWrite, const char *phase) {
     emitHoldingWatchForce("H100", v100[0], &lastH100, &haveH100,
                           v100[0] == expectWrite);
     emitHoldingWatch("H101", v100[1], &lastH101, &haveH101);
-  } else {
-    // Always visible after write — bypass rate-limit once for confirm path.
-    if (st100 == MbQuietStatus::ExcBusy) {
-      Serial.println(F("H100 confirm busy/ex6"));
-    } else if (st100 == MbQuietStatus::Timeout) {
-      Serial.println(F("H100 confirm busy/TO"));
-    } else {
-      logH100BusyOnce(st100, exc);
-    }
+    pushUiSnap(nullptr);
+    lastActivityMs = millis();
+    silentAnnounced = false;
+    return true;
   }
-
-  delayPumpUi(MB_FAST_INTER_MS);
-
-  uint16_t vTemp[6] = {0};
-  uint8_t exc1 = 0;
-  MbQuietStatus st1 =
-      mbReadHoldingsQuietRetry(MB_TEMP_BLOCK, vTemp, MB_TEMP_BLOCK_QTY, &exc1);
-  if (st1 == MbQuietStatus::Ok) {
-    absorbTempBlock(vTemp);
+  // Always visible after write — bypass rate-limit once for confirm path.
+  if (st100 == MbQuietStatus::ExcBusy) {
+    Serial.println(F("H100 confirm busy/ex6"));
+  } else if (st100 == MbQuietStatus::Timeout) {
+    Serial.println(F("H100 confirm busy/TO"));
   } else {
-    uint16_t v1 = 0;
-    if (mbReadHoldingsQuietRetry(MB_H1_REQ, &v1, 1, &exc1) == MbQuietStatus::Ok) {
-      emitHoldingWatch("H1", v1, &lastH1, &haveH1);
-      if (MB_OUTLET_ADDR == 1) {
-        lastOutlet = v1;
-        haveOutlet = true;
-      }
-    }
+    logH100BusyOnce(st100, exc);
   }
-
-  pushUiSnap(nullptr);
   lastActivityMs = millis();
   silentAnnounced = false;
+  return false;
 }
 
-// After FC16/FC06: dual FC03 confirm (catch write + auto-clear 1→0), resume poll.
-static void h100WriteEndWindow(uint16_t expectWrite) {
+static MbWriteResult mbFc16WithRetries(uint16_t addr, uint16_t value,
+                                       const char *tag);
+
+// If ACK but holding != expect: one more FC16 (value-semantics re-pulse for Start).
+static MbWriteResult h100RetryAfterAckMismatch(uint16_t expectWrite,
+                                               MbWriteResult wr,
+                                               const char *tag) {
+  if (wr != MbWriteResult::Ack) return wr;
+  if (!haveH100 || lastH100 == expectWrite) return wr;
+
+  Serial.printf(
+      "H100 mismatch after ACK (got=%u expect=%u) — retry FC16 once\n",
+      (unsigned)lastH100, (unsigned)expectWrite);
+  if (expectWrite == MB_H100_START_VALUE && lastH100 == 0) {
+    Serial.println(
+        F("H100 value-semantics: re-pulse FC16 H100=1 (ACK but still 0)"));
+  } else if (expectWrite == 0 && lastH100 != 0) {
+    Serial.println(
+        F("H100 value-semantics: re-pulse FC16 H100=0 (ACK but still nonzero)"));
+  }
+  char st[96];
+  snprintf(st, sizeof(st), "H100 retry after ACK…");
+  uiTestSetStatus(st);
+  pushUiSnap(st);
+
+  MbWriteResult wr2 =
+      mbFc16WithRetries(MB_H100_START_ADDR, expectWrite, tag ? tag : "H100");
+  delayPumpUi(MB_H100_CONFIRM_EARLY_MS);
+  h100ConfirmH100Only(expectWrite, "post-retry");
+  if (haveH100 && lastH100 != expectWrite) {
+    Serial.printf(
+        "H100 still mismatch after retry (got=%u expect=%u) — "
+        "may be auto-clear 1→0 pulse or write ignored\n",
+        (unsigned)lastH100, (unsigned)expectWrite);
+  }
+  return (wr2 == MbWriteResult::Ack) ? wr2 : wr;
+}
+
+// After FC16/FC06: short dual FC03 confirm + H13; NO SCAN6/DIFFAULT (ops UI).
+// Optional post-ACK FC16 retry when holding != expect. Caller releases write guard.
+static MbWriteResult h100WriteEndWindow(uint16_t expectWrite, MbWriteResult wr,
+                                        const char *retryTag) {
   // Sample 1 early — catch holding=1 before pump auto-clears.
   delayPumpUi(MB_H100_CONFIRM_EARLY_MS);
-  h100ConfirmSample(expectWrite, "1/2");
+  h100ConfirmH100Only(expectWrite, "1/2");
+
+  wr = h100RetryAfterAckMismatch(expectWrite, wr, retryTag);
 
   // Sample 2 — if pump cleared 1→0, print CHANGE (both values visible).
   delayPumpUi(MB_H100_CONFIRM_LATE_MS);
-  h100ConfirmSample(expectWrite, "2/2");
+  h100ConfirmH100Only(expectWrite, "2/2");
 
-  // Force DIFF watch (H13 bits) right after Start — LCD + Serial
+  // Short H13 DIFF watch only (one FC03) — not SCAN6/DIFFAULT.
   delayPumpUi(MB_FAST_INTER_MS);
   pollDiffWatchBlock(true);
   {
@@ -2096,17 +2128,14 @@ static void h100WriteEndWindow(uint16_t expectWrite) {
     pushUiSnap(st);
   }
 
-  // Fault hunt: SCAN6 + DIFF vs pre-Start. SCANFC = Serial-only (blocks UI).
-  scanHoldingsForRaw6("post-FC16 Start", true);
-  if (haveDiffBase) {
-    runDiffaultCompare("post-FC16 Start");
-  }
-
   mbScanBusy = false;
   mbNextFastMs = millis() + MB_H100_POLL_RESUME_MS;
-  Serial.println(F("  poll RESUMED (confirm + H13 + SCAN6 + DIFFAULT; SCANFC=Serial)"));
+  Serial.println(
+      F("  poll RESUMED (short confirm + H13; SCAN6/DIFFAULT=Serial only)"));
   lastActivityMs = millis();
   silentAnnounced = false;
+  (void)retryTag;
+  return wr;
 }
 
 static bool writeBeginGuard(const char *why) {
@@ -2188,17 +2217,24 @@ static void runH100WriteValue(uint16_t value, bool fromUi, const char *tag) {
   h100WriteBeginWindow(logTag);
   MbWriteResult wr = mbFc16WithRetries(MB_H100_START_ADDR, value, logTag);
 
-  h100WriteEndWindow(value);
+  // Short confirm + optional post-ACK retry; release UI busy ASAP after this.
+  wr = h100WriteEndWindow(value, wr, logTag);
 
   if (wr == MbWriteResult::Ack) {
-    snprintf(st, sizeof(st), "%s OK  FC16 H100=%u → now %u", kind, (unsigned)value,
-             (unsigned)(haveH100 ? lastH100 : 0));
+    if (haveH100 && lastH100 != value) {
+      snprintf(st, sizeof(st),
+               "%s ACK  FC16 H100=%u → now %u (pulse/auto-clear?)", kind,
+               (unsigned)value, (unsigned)lastH100);
+    } else {
+      snprintf(st, sizeof(st), "%s OK  FC16 H100=%u → now %u", kind,
+               (unsigned)value, (unsigned)(haveH100 ? lastH100 : 0));
+    }
   } else {
     snprintf(st, sizeof(st), "%s FAIL  FC16=%s (see Serial)", kind,
              mbWriteResultStr(wr));
   }
   pushUiSnap(st);
-  writeEndGuard();
+  writeEndGuard();  // unlock Start/Stop taps — never after long scans
 }
 
 static void runH100StartWrite(bool fromUi) {
@@ -2300,7 +2336,7 @@ static void runH100Fc06Oneshoot(bool haveExplicit, uint16_t value) {
       mbWriteSingleRegisterTagged(MB_H100_START_ADDR, value, "H100_FC06", true);
   Serial.printf("H100_FC06 result=%s (FC06 val=%u) — primary Start is FC16\n",
                 mbWriteResultStr(wr), (unsigned)value);
-  h100WriteEndWindow(value);
+  wr = h100WriteEndWindow(value, wr, "H100_FC06");
 
   snprintf(st, sizeof(st), "FC06=%u %s (use fc16)", (unsigned)value,
            mbWriteResultStr(wr));
@@ -2357,7 +2393,8 @@ static void runH100AltMethods() {
 
   Serial.println();
   Serial.println(F("=== H100_ALT done — compare ACK / EXC6 / TIMEOUT lines above ==="));
-  h100WriteEndWindow(steps[nSteps - 1].value);
+  (void)h100WriteEndWindow(steps[nSteps - 1].value, MbWriteResult::Ack,
+                           "H100_ALT");
   uiTestUpdateBasic(lastH1, haveH1, lastH100, haveH100, lastH101, haveH101, lastH13,
                haveH13, "H100_ALT done — see Serial");
 }
@@ -2591,8 +2628,8 @@ static void pollFastHoldings() {
   delayPumpUi(MB_FAST_INTER_MS);
   pollH500ErrorBlock(false);
 
-  // Panel Start → H100 1→0: SCAN6 only (SCANFC = Serial-only; blocks UI)
-  if (h100Cleared10) {
+  // Panel Start → H100 1→0: optional SCAN6 (default OFF — blocks UI for seconds)
+  if (h100Cleared10 && MB_AUTO_SCAN_AFTER_START) {
     scanHoldingsForRaw6("H100 1->0", false);
   }
 

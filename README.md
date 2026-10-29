@@ -13,8 +13,8 @@ Firmware na **Waveshare ESP32-S3-Touch-LCD-7B** (UART **RX=GPIO15**, **TX=GPIO16
    - settle, **holding 7–23** → **`H13` bits** (DIFF; **H13=64 bits=6** ≈ panel error 6)
    - settle, **500–520** quiet CHANGE/nonzero
 3. **LCD op-test UI** (LVGL, no flicker): **OUT**, **IN**, **SP** s **− / +** (**0.5 °C**, FC16), **H100/H101**, **H13 bits** + velké **START** (**FC16 H100=1**) a **STOP** (**FC16 H100=0**).
-4. **START/STOP harden** — quiet-bus **≥200 ms**, až **3×** FC16 při **EXC6/TIMEOUT**, FC03 confirm, LCD status, touch debounce + **in-flight lock** (druhý zápis se zahodí).
-5. **SCAN6** / **SCANFC** (Serial-only) / **DIFFAULT** — beze změny logiky H13.
+4. **START/STOP harden** — quiet-bus **≥200 ms**, až **3×** FC16 při **EXC6/TIMEOUT**, **short** FC03 confirm (~30+200 ms) + **1× post-ACK retry** když H100≠expect, LCD status, touch debounce + **in-flight lock**. Busy se uvolní hned po confirm — **ne** přes SCAN6/DIFFAULT.
+5. **SCAN6** / **SCANFC** / **DIFFAULT** — **Serial-only** (`scan6` / `scanfc` / `diffault`); ne auto kolem UI Start (blokovalo taps).
 
 Hledej: **`OUT=` / `IN=` / `SP=`**, **`H13=` / `bits=`**, **`H100_START` / `H100_STOP` / `SP_SET`**.
 
@@ -58,10 +58,10 @@ FC04 / FC01 / FC02 **neposílají se** (timeout šum — scan je jen FC03). Fair
 
 ### ⚠️ START / H100 zápis — varování
 
-- **UI START / `h100` / `fc16`** = quiet-bus **≥200 ms** → **FC16 H100=1** (až **3 pokusy** při EXC6/TO) → dual FC03 confirm. **UI STOP / `stop` / `fc16 0`** = **FC16 H100=0**. Plný **TX/RX hex** + LCD status.
+- **UI START / `h100` / `fc16`** = quiet-bus **≥200 ms** → **FC16 H100=1** (až **3 pokusy** při EXC6/TO) → short FC03 confirm; při **ACK ale H100≠expect** ještě **1× FC16 retry**. **UI STOP / `stop` / `fc16 0`** = **FC16 H100=0**. Plný **TX/RX hex** + LCD status.
 - **FC06 na této Spawer pumpě nic nedělá** — Start/Stop/SP = **jen FC16**.
 - Panel často ukáže **H100 1→0** (auto-clear) — OK; LCD má oddělené START/STOP (ne toggle).
-- Touch: **debounce ~450 ms** + **write in-flight lock** — druhý tap během zápisu se ignoruje.
+- Touch: **debounce ~450 ms** + **write in-flight lock** — lock drží jen quiet+FC16+short confirm (ne SCAN/DIFF).
 - **`h100alt`** = experiment: **FC16 qty1=1 / =0**, pak FC06 srovnání — u každého `ACK` / `EXC6` / `TIMEOUT`.
 - Starý **START_PROBE** (`start`) dál zkouší kandidáty v **0–31** — oddělené od H100.
 - **holding[0]=1 jako „start“ je nepotvrzené** — hodnota ~200 při běhu = SP candidate.
@@ -122,10 +122,10 @@ GND (volitelně) ───  společná zem
 2. Dip **RS485 termination** na Waveshare: **OFF / NC**.
 3. **Reflash** + otevři monitor @ 115200 (`pio device monitor`).
 4. LCD: **OUT °C**, **IN °C**, **SP °C** (−/+), **H100**, **H101**, **H13**; Serial = `OUT=` / `IN=` / `SP=` / `H100=` + quiet DIFF CHANGE.
-5. **LCD START** / `fc16` — FC16 (+retries) + confirm + **H13 force** + SCAN6 + DIFFAULT (**SCANFC ne auto**).
+5. **LCD START** / `fc16` — FC16 (+retries) + short confirm + **H13**; **ne** auto SCAN6/DIFFAULT (uvolní busy hned).
 6. **LCD STOP** / `stop` / `fc16 0`.
 7. **SP − / +** nebo `sp-` / `sp+` / `sp 200` — FC16 setpoint ±0.5 °C.
-8. **Panel Start** — **`H100=… CHANGE` 1→0** → auto **SCAN6**; sleduj **`H13=… bits=`**.
+8. **Panel Start** — **`H100=… CHANGE` 1→0**; sleduj **`H13=… bits=`** (SCAN6 jen ručně).
 9. Ručně: **`scanfc`**, **`scan6`**, **`diffault`**.
 
 **Očekávání:** po Start **`H13=64 bits=6`** na Serial + LCD (hypotéza = panel error 6). LCD status ukáže `START OK` / `START FAIL`.
@@ -156,7 +156,7 @@ USB 115200, příkaz + Enter (**volitelné**):
 | Příkaz | Akce |
 |--------|------|
 | *(auto fast)* | FC03 H100–101 + H0–5 (OUT/IN/SP) + 500–520 ~1 s |
-| *(LCD Start / panel 1→0)* | po FC16 confirm nebo H100 **1→0** → **`SCAN6`** |
+| *(LCD Start)* | quiet+FC16+short confirm (+post-ACK retry); SCAN6/DIFF = Serial |
 | `h100` / `start100` / `fc16` | LCD Start (**FC16**, retries) |
 | `stop` / `fc16 0` | LCD Stop (**FC16 H100=0**, retries) |
 | `sp+` / `sp-` / `sp <raw>` | setpoint FC16 ±0.5 °C / absolute raw×0.1 |
