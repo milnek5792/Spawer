@@ -38,6 +38,7 @@ lv_obj_t *s_lblTitle = nullptr;
 lv_obj_t *s_lblH1 = nullptr;
 lv_obj_t *s_lblH100 = nullptr;
 lv_obj_t *s_lblH101 = nullptr;
+lv_obj_t *s_lblH13 = nullptr;
 lv_obj_t *s_lblStatus = nullptr;
 lv_obj_t *s_btnStart = nullptr;
 
@@ -47,6 +48,7 @@ volatile bool s_startReq = false;
 char s_txtH1[48] = "";
 char s_txtH100[32] = "";
 char s_txtH101[32] = "";
+char s_txtH13[64] = "";
 char s_txtStatus[96] = "";
 int s_btnColorState = -1;  // -1 unknown, 0 idle(green), 1 active(amber)
 
@@ -168,6 +170,13 @@ void buildScreen() {
   lv_obj_set_style_text_font(s_lblH101, &lv_font_montserrat_32, 0);
   lv_obj_align(s_lblH101, LV_ALIGN_TOP_LEFT, 48, 240);
 
+  s_lblH13 = lv_label_create(scr);
+  lv_label_set_text(s_lblH13, "H13  —");
+  strncpy(s_txtH13, "H13  —", sizeof(s_txtH13) - 1);
+  lv_obj_set_style_text_color(s_lblH13, lv_color_hex(0xFF6B6B), 0);
+  lv_obj_set_style_text_font(s_lblH13, &lv_font_montserrat_32, 0);
+  lv_obj_align(s_lblH13, LV_ALIGN_TOP_LEFT, 48, 300);
+
   s_btnStart = lv_button_create(scr);
   lv_obj_set_size(s_btnStart, 420, 160);
   lv_obj_align(s_btnStart, LV_ALIGN_BOTTOM_MID, 0, -48);
@@ -187,7 +196,7 @@ void buildScreen() {
   lv_obj_clear_flag(btnLbl, LV_OBJ_FLAG_CLICKABLE);
 
   s_lblStatus = lv_label_create(scr);
-  const char *st0 = "Start = quiet-bus FC06 H100 (tap; Serial H100_START)";
+  const char *st0 = "Start = quiet-bus FC16 H100 (H13 = fault bits)";
   lv_label_set_text(s_lblStatus, st0);
   strncpy(s_txtStatus, st0, sizeof(s_txtStatus) - 1);
   lv_obj_set_style_text_color(s_lblStatus, lv_color_hex(0x8A93A3), 0);
@@ -291,10 +300,11 @@ void uiTestTick(void) {
 }
 
 void uiTestUpdate(uint16_t h1, bool haveH1, uint16_t h100, bool haveH100,
-                  uint16_t h101, bool haveH101, const char *status) {
+                  uint16_t h101, bool haveH101, uint16_t h13, bool haveH13,
+                  const char *status) {
   if (!s_ok) return;
 
-  char buf[64];
+  char buf[72];
   if (haveH1) {
     int whole = (int)h1 / 10;
     int frac = (int)h1 % 10;
@@ -317,6 +327,35 @@ void uiTestUpdate(uint16_t h1, bool haveH1, uint16_t h100, bool haveH100,
     snprintf(buf, sizeof(buf), "H101  —");
   }
   setLabelIfChanged(s_lblH101, s_txtH101, sizeof(s_txtH101), buf);
+
+  if (haveH13) {
+    char bits[40];
+    size_t n = 0;
+    bits[0] = '\0';
+    bool first = true;
+    for (uint8_t b = 0; b < 16; b++) {
+      if ((h13 & (uint16_t)(1u << b)) == 0) continue;
+      if (!first && n + 1 < sizeof(bits)) {
+        bits[n++] = ',';
+        bits[n] = '\0';
+      }
+      first = false;
+      int w = snprintf(bits + n, sizeof(bits) - n, "%u", (unsigned)b);
+      if (w < 0) break;
+      n += (size_t)w;
+      if (n >= sizeof(bits)) break;
+    }
+    if (first) {
+      snprintf(buf, sizeof(buf), "H13  %u  0x%X  bits=-", (unsigned)h13,
+               (unsigned)h13);
+    } else {
+      snprintf(buf, sizeof(buf), "H13  %u  0x%X  bits=%s", (unsigned)h13,
+               (unsigned)h13, bits);
+    }
+  } else {
+    snprintf(buf, sizeof(buf), "H13  —");
+  }
+  setLabelIfChanged(s_lblH13, s_txtH13, sizeof(s_txtH13), buf);
 
   if (status && *status) {
     setLabelIfChanged(s_lblStatus, s_txtStatus, sizeof(s_txtStatus), status);

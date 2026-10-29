@@ -17,9 +17,11 @@ void uiTestTick(void);
 /**
  * Refresh labels from last Modbus values.
  * H1 shown as °C (raw × 0.1). H100 / H101 as raw ints.
+ * H13 as hex + set bits (DIFFAULT: H13=64 → bits=6 ≈ panel error 6).
  */
 void uiTestUpdate(uint16_t h1, bool haveH1, uint16_t h100, bool haveH100,
-                  uint16_t h101, bool haveH101, const char *status);
+                  uint16_t h101, bool haveH101, uint16_t h13, bool haveH13,
+                  const char *status);
 
 /** True once after Start button press (or long-press toggle request). */
 bool uiTestConsumeStartRequest(void);

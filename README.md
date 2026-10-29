@@ -6,29 +6,29 @@ Firmware na **Waveshare ESP32-S3-Touch-LCD-7B** (UART **RX=GPIO15**, **TX=GPIO16
 
 ### Aktuální cíl: H100 Start (panel 1→0) + LCD test UI
 
-1. **Quiet Serial (default)** — jen **`H100=` / `H1=` / `H101=`** (+ **`CHANGE`**), **`H100 busy/ex6`** (rate-limited), **`H100_START`**, **`SCAN6` hits** (`ERR6_ADDR=` / `Hnnn=6`), `alive` / `SILENT`. Žádné TEMP / bulk dump / hex.
+1. **Quiet Serial (default)** — **`H100=` / `H1=` / `H101=`** (+ **`CHANGE`**), quiet **`H7`/`H12`/`H13`/`H20`/`H23` CHANGE**, **`H13=N (0x..) bits=B`**, **`H100 busy/ex6`**, **`H100_START`**, **`SCAN6` hits**, `alive` / `SILENT`.
 2. **FC03 fast watch** — slave **1**, **9600 8N1**, každých **~1 s** (priorita **H100**):
    - **holding 100–101** (blok qty 2) → **`H100=N`** / **`H101=N`** (při OK + LCD)
    - **Modbus EXC 0x06** (Slave Device Busy): **ne** mazat last good / UI „—“; **2–3× retry** + backoff ~200 ms; log **`H100 busy/ex6`**
-   - **≠** `ERR6_ADDR` / holding **raw=6** (fault kód — SCAN6)
    - settle, pak **holding 1** → **`H1=N`**; na LCD **°C = raw × 0.1**
-   - **H0** volitelně **OFF**; auto temp/error scan **OFF** (nehladoví H100)
+   - settle, **holding 7–23** → quiet **`H7`/`H12`/`H13`/`H20`/`H23`** (**CHANGE**); **`H13=64 bits=6`** ≈ panel **error 6**
+   - **H0** volitelně **OFF**; auto temp/error scan **OFF**
    - **Milan:** panel **Start** → **`H100=… CHANGE`** (**1→0**) → auto **SCAN6**
-3. **LCD test UI** (LVGL): **H1 (°C)**, **H100**, **H101** + **START** → **quiet-bus + FC16 qty1 holding 100** (toggle: **0** když H100==1, jinak **1**) + settle ≥800 ms. Serial: `h100` / `fc16` (= totéž). **FC06 na této pumpě nic nedělá.** Alts: `h100alt`.
-4. **SCAN6** — FC03 bloky **qty 16** přes **0–2047**; výpis **jen** adres s raw **6** (`ERR6_ADDR=nnn` + `Hnnn=6`). TO bloky přeskočí; stop po 8× TO v řadě. Auto po FC16 Start / H100 1→0; ručně **`scan6`** / **`err6`**.
-5. **SCANFC** — **fault lit NOW**: FC04 short windows → `ERR6_IN=` (raw=6; soft LO/HI); FC01 coils / FC02 DI 0–255 → `COIL_ON=` / `DI_ON=` + `ALARM6_*` na index 5/6. Skip TO. Ručně **`scanfc`** / **`fcscan`**.
-6. **DIFFAULT** — FC03 (+FC04) okna 0–31 / 100–120 / 200–220 / 400–520 / 1000–1020 / 2000–2020; 1. `diffault` = baseline, 2. = jen `DIFF_ADDR=` / `DIFF_IN=`. Auto před/po FC16. `diffault clear` / `base`.
+3. **LCD test UI** (LVGL): **H1 (°C)**, **H100**, **H101**, **H13 hex/bits** + **START** → **quiet-bus + FC16 qty1 holding 100**. Po Start status = H13. Serial: `h100` / `fc16`. **FC06 nic nedělá.**
+4. **SCAN6** — FC03 raw **6** 0–2047. Auto po FC16 / H100 1→0; ručně **`scan6`**.
+5. **SCANFC** — **Serial-only** (`scanfc` / `fcscan`); **ne auto** (blokuje UI). FC04/01/02 hunt.
+6. **DIFFAULT** — okna; 1. `diffault` = baseline, 2. = `DIFF_ADDR=`. Auto před/po FC16.
 7. **Temp/error scan** — jen ručně `poll` (+ `verbose`). **START_PROBE** auto OFF (`start`).
 
-Hledej: **`H100=` / `CHANGE`**, **`ERR6_ADDR=` / `ERR6_IN=` / `DIFF_ADDR=` / `COIL_ON=`**, **`H100_START`**.
+Hledej: **`H13=` / `bits=`**, **`H100=` / `CHANGE`**, **`DIFF_ADDR=`**, **`H100_START`**.
 
-> **Milan — REFLASH** (fault lit → **`scanfc`**; Start = FC16; SCAN6/DIFFAULT):
+> **Milan — REFLASH** (H13 bits; Start = FC16; SCANFC = Serial-only):
 > ```bash
 > cd …/docs/spawer-rs485/spawer_rs485_sniffer
 > pio run -t upload
 > pio device monitor -e waveshare_esp32s3_lcd7b
 > ```
-> Po uploadu zavři/znovu otevři monitor. **Error 6 svítí** → hned napiš **`scanfc`**. Jinak: `scan6` / `diffault` (2×) / `fc16`.
+> Po Start očekávej **`H13=64 (0x40) bits=6`** (+ LCD). Ručně: `scanfc` / `scan6` / `diffault` / `fc16`.
 
 ### Live FC03 hodnoty (Milan) — jen raw
 
@@ -109,14 +109,13 @@ GND (volitelně) ───  společná zem
 1. Zapoj Spawer A/B (paralelní napojení na panel).
 2. Dip **RS485 termination** na Waveshare: **OFF / NC**.
 3. **Reflash** + otevři monitor @ 115200 (`pio device monitor`).
-4. LCD ukáže **H1 °C**, **H100**, **H101**; Serial quiet = `H100=` / `H1=` / `H101=` ~1 s + light **`H500–520`** (CHANGE/nonzero).
-5. **Error 6 svítí na panelu** — hned **`scanfc`** → `ERR6_IN=` / `COIL_ON=` / `DI_ON=` / `ALARM6_*` (FC04/01/02).
-6. **Panel Start** — **`H100=… CHANGE` 1→0** → auto **SCAN6 + SCANFC**.
-7. **LCD START** / `fc16` — FC16 + confirm + **SCAN6 + DIFFAULT + SCANFC**.
-8. Ručně: **`scan6`**, **`diffault`** (2×: base→diff), **`scanfc`**.
-9. Pošli `ERR6_IN=` / `DIFF_ADDR=` / `COIL_ON=` / `ALARM6_` / `SCANFC` / `DIFFAULT` řádky.
+4. LCD: **H1 °C**, **H100**, **H101**, **H13 hex/bits**; Serial = `H100=` / `H1=` / `H101=` + quiet **`H7`/`H12`/`H13`/`H20`/`H23` CHANGE**.
+5. **LCD START** / `fc16` — FC16 + confirm + **H13 force** + SCAN6 + DIFFAULT (**SCANFC ne auto**).
+6. **Panel Start** — **`H100=… CHANGE` 1→0** → auto **SCAN6**; sleduj **`H13=… bits=`**.
+7. Ručně: **`scanfc`** (Serial-only), **`scan6`**, **`diffault`**.
+8. Pošli `H13=` / `bits=` / `DIFF_ADDR=` / `CHANGE` řádky.
 
-**Očekávání:** při svítící chybě 6 `scanfc` něco najde (input/coil), nebo potvrdí UI-only / jiné kódování.
+**Očekávání:** po Start **`H13=64 bits=6`** na Serial + LCD (hypotéza = panel error 6).
 
 **Tip při samých TIMEOUT:** prohoď **A↔B**, ověř napájení Spaweru, pak baud `4800` / `19200`.
 
