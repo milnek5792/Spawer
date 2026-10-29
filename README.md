@@ -4,31 +4,26 @@
 
 Firmware na **Waveshare ESP32-S3-Touch-LCD-7B** (UART **RX=GPIO15**, **TX=GPIO16**, auto DE/RE):
 
-### Aktuální cíl: H100 Start (panel 1→0) + LCD test UI
+### Aktuální cíl: **op-test LCD** (zítra) — temps + SP? + START/STOP
 
-1. **Quiet Serial (default)** — **`H100=` / `H1=` / `H101=`** (+ **`CHANGE`**), quiet **`H7`/`H12`/`H13`/`H20`/`H23` CHANGE**, **`H13=N (0x..) bits=B`**, **`H100 busy/ex6`**, **`H100_START`**, **`SCAN6` hits**, `alive` / `SILENT`.
+1. **Quiet Serial (default)** — **`H100=` / `H1=` / `H101=`** (+ **`CHANGE`**), quiet **`H2`–`H5` / `SP?`**, quiet **`H7`/`H12`/`H13`/`H20`/`H23` CHANGE**, **`H13=N bits=B`**, **`H100_START` / `H100_STOP`**, `alive` / `SILENT`.
 2. **FC03 fast watch** — slave **1**, **9600 8N1**, každých **~1 s** (priorita **H100**):
-   - **holding 100–101** (blok qty 2) → **`H100=N`** / **`H101=N`** (při OK + LCD)
-   - **Modbus EXC 0x06** (Slave Device Busy): **ne** mazat last good / UI „—“; **2–3× retry** + backoff ~200 ms; log **`H100 busy/ex6`**
-   - settle, pak **holding 1** → **`H1=N`**; na LCD **°C = raw × 0.1**
-   - settle, **holding 7–23** → quiet **`H7`/`H12`/`H13`/`H20`/`H23`** (**CHANGE**); **`H13=64 bits=6`** ≈ panel **error 6**
-   - **H0** volitelně **OFF**; auto temp/error scan **OFF**
-   - **Milan:** panel **Start** → **`H100=… CHANGE`** (**1→0**) → auto **SCAN6**
-3. **LCD test UI** (LVGL): **H1 (°C)**, **H100**, **H101**, **H13 hex/bits** + **START** → **quiet-bus + FC16 qty1 holding 100**. Po Start status = H13. Serial: `h100` / `fc16`. **FC06 nic nedělá.**
-4. **SCAN6** — FC03 raw **6** 0–2047. Auto po FC16 / H100 1→0; ručně **`scan6`**.
-5. **SCANFC** — **Serial-only** (`scanfc` / `fcscan`); **ne auto** (blokuje UI). FC04/01/02 hunt.
-6. **DIFFAULT** — okna; 1. `diffault` = baseline, 2. = `DIFF_ADDR=`. Auto před/po FC16.
-7. **Temp/error scan** — jen ručně `poll` (+ `verbose`). **START_PROBE** auto OFF (`start`).
+   - **holding 100–101** → **`H100=` / `H101=`**
+   - settle, **holding 1–5** → **`H1=`** (LCD **×0.1 °C**) + **`H2`–`H5`** (SP? kandidáti Fairland-like)
+   - settle, **holding 7–23** → **`H13` bits** (DIFF; **H13=64 bits=6** ≈ panel error 6)
+   - settle, **500–520** quiet CHANGE/nonzero
+3. **LCD op-test UI** (LVGL, no flicker): **H1 °C**, **SP? (H2–H5)**, **H2–H5**, **H100/H101**, **H13 bits** + velké **START** (**FC16 H100=1**) a **STOP** (**FC16 H100=0**). Serial: `h100` / `fc16` / `stop` / `fc16 0`.
+4. **SCAN6** / **SCANFC** (Serial-only) / **DIFFAULT** — beze změny logiky H13.
 
-Hledej: **`H13=` / `bits=`**, **`H100=` / `CHANGE`**, **`DIFF_ADDR=`**, **`H100_START`**.
+Hledej: **`SP?`**, **`H13=` / `bits=`**, **`H100_START` / `H100_STOP`**.
 
-> **Milan — REFLASH** (H13 bits; Start = FC16; SCANFC = Serial-only):
+> **Milan — REFLASH zítra (op test)**:
 > ```bash
 > cd …/docs/spawer-rs485/spawer_rs485_sniffer
 > pio run -t upload
 > pio device monitor -e waveshare_esp32s3_lcd7b
 > ```
-> Po Start očekávej **`H13=64 (0x40) bits=6`** (+ LCD). Ručně: `scanfc` / `scan6` / `diffault` / `fc16`.
+> LCD: **H1**, **SP?**, **H100/H101**, **H13**, **START** + **STOP**. Serial quiet. Po Start očekávej **`H13=… bits=`**. Ručně: `stop` / `fc16 0` / `scanfc`.
 
 ### Live FC03 hodnoty (Milan) — jen raw
 
@@ -36,20 +31,21 @@ Hledej: **`H13=` / `bits=`**, **`H100=` / `CHANGE`**, **`DIFF_ADDR=`**, **`H100_
 |-----|---------------|----------|
 | 0 | **200–210** | **Není** 0/1 power — spíš režim/setpoint; fast poll **OFF** |
 | 1 | **190–200** | fast poll `H1=` · LCD **×0.1 °C** (19.0–20.0) |
-| 2–3 | **180–190** | |
-| 4–6, 9–11, 13–15 | často **0** | kandidáti START_PROBE FC06 |
-| 7–8 | **190–200** | |
-| 12 | **0** nebo **8** | |
-| **100** | **0 / 1** | **Start watch** — panel Start → **CHANGE 1→0**; UI FC06 write |
-| 101 | **?** | fast poll `H101=` |
+| 2–3 | **180–190** | fast poll; **SP? kandidáti** (raw×0.1) |
+| 4–5 | často temp-like / 0 | také SP? kandidáti |
+| 7–8 | **190–200** | DIFF watch |
+| 12 | **0** nebo **8** | DIFF watch |
+| **13** | **64** (bit6) | DIFF ≈ panel error 6 |
+| **100** | **0 / 1** | **START=1 / STOP=0** (FC16); panel Start → **CHANGE 1→0** |
+| 101 | **?** (často 2) | fast poll `H101=` |
 
 FC04 / FC01 / FC02 **neposílají se** (timeout šum — scan je jen FC03).
 
 ### ⚠️ START / H100 zápis — varování
 
-- **UI Start / `h100` / `fc16`** = pause FC03 → flush RX → **≥80 ms quiet bus** → **FC16 qty1 holding[100]** (toggle) → echo → settle **≥800 ms** → resume poll. Vždy plný **TX/RX hex**.
-- **FC06 na této Spawer pumpě nic nedělá** — primary Start je **jen FC16** (ne režimový přepínač).
-- Panel ukázal **H100 1→0** (pak auto-clear); zápis **1** může být špatně — firmware proto **píše 0 když H100==1**, jinak **1**; po zápisu **nebojuje** auto-clear.
+- **UI START / `h100` / `fc16`** = quiet-bus → **FC16 H100=1**. **UI STOP / `stop` / `fc16 0`** = **FC16 H100=0**. Settle ≥800 ms + confirm. Plný **TX/RX hex**.
+- **FC06 na této Spawer pumpě nic nedělá** — Start/Stop = **jen FC16**.
+- Panel často ukáže **H100 1→0** (auto-clear) — OK; LCD má oddělené START/STOP (ne toggle).
 - **`h100alt`** = experiment: **FC16 qty1=1 / =0**, pak FC06 srovnání — u každého `ACK` / `EXC6` / `TIMEOUT`.
 - Starý **START_PROBE** (`start`) dál zkouší kandidáty v **0–31** — oddělené od H100.
 - **holding[0]=1 jako „start“ je nepotvrzené** — hodnota ~200 při běhu ukazuje spíš režim.
