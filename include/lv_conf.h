@@ -1,0 +1,55 @@
+/**
+ * lv_conf.h — LVGL 9.2 pro Waveshare ESP32-S3-Touch-LCD-7B (1024×600, OPI PSRAM)
+ */
+#if 1
+#ifndef LV_CONF_H
+#define LV_CONF_H
+
+#ifndef __ASSEMBLY__
+#include <stdint.h>
+#endif
+
+#define LV_COLOR_DEPTH 16
+#define LV_COLOR_16_SWAP 0
+
+#define LV_TXT_ENC LV_TXT_ENC_UTF8
+#define LV_USE_FONT_COMPRESSED 0
+
+#define LV_USE_OS LV_OS_NONE
+
+#define LV_USE_STDLIB_MALLOC LV_STDLIB_BUILTIN
+#define LV_MEM_SIZE (512U * 1024U)
+#define LV_MEM_POOL_INCLUDE "esp_heap_caps.h"
+#define LV_MEM_POOL_ALLOC(size) heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+
+#define LV_USE_LOG 0
+
+#define LV_USE_NATIVE_HELIUM_ASM 0
+#define LV_USE_DRAW_SW_ASM LV_DRAW_SW_ASM_NONE
+
+#define LV_FONT_MONTSERRAT_8  0
+#define LV_FONT_MONTSERRAT_10 0
+#define LV_FONT_MONTSERRAT_12 0
+#define LV_FONT_MONTSERRAT_14 1
+#define LV_FONT_MONTSERRAT_16 1
+#define LV_FONT_MONTSERRAT_18 1
+#define LV_FONT_MONTSERRAT_20 0
+#define LV_FONT_MONTSERRAT_22 1
+#define LV_FONT_MONTSERRAT_24 1
+#define LV_FONT_MONTSERRAT_28 1
+#define LV_FONT_MONTSERRAT_32 1
+#define LV_FONT_MONTSERRAT_40 1
+#define LV_FONT_MONTSERRAT_48 1
+
+#define LV_USE_LED 1
+#define LV_USE_LABEL 1
+#define LV_USE_BUTTON 1
+#define LV_USE_BUTTONMATRIX 1
+#define LV_USE_IMAGE 1
+#define LV_USE_TEXTAREA 1
+#define LV_USE_KEYBOARD 1
+
+#define LV_USE_THEME_DEFAULT 1
+
+#endif /* LV_CONF_H */
+#endif
