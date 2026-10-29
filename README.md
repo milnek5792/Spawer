@@ -108,20 +108,20 @@ GND (volitelně) ───  společná zem
 1. Zapoj Spawer A/B (paralelní napojení na panel).
 2. Dip **RS485 termination** na Waveshare: **OFF / NC**.
 3. **Reflash** + otevři monitor @ 115200 (`pio device monitor`).
-4. LCD ukáže **H1 °C**, **H100**, **H101**; Serial quiet = `H100=` / `H1=` / `H101=` ~1 s + **`H500=`…`H506=`** / **`ERR5xx=`** při CHANGE/nonzero (bez TEMP dump).
-5. **Panel Start** — hledej **`H100=… CHANGE`** (**1→0**, pak často zpět **0** / error auto-clear) a **`ERR5xx=`** / `ERROR_ADDR holding=500…506`.
+4. LCD ukáže **H1 °C**, **H100**, **H101**; Serial quiet = `H100=` / `H1=` / `H101=` ~1 s + light **`H500–520`** (CHANGE/nonzero).
+5. **Panel Start** — hledej **`H100=… CHANGE`** (**1→0**) a hned **`=== ERR_DUMP (H100 1->0) ===`** → **`Hnnn=`** / **`ERR_ADDR=nnn raw=…`** (jen nonzero; 500–506 nestačilo).
 6. **LCD START** (nebo Serial `h100` / `fc16`) — **FC16 only**:
    - `H100_START tap (UI CLICKED)` — touch dorazil
    - `=== H100_START (UI) ===` + `quiet-bus` + **`H100_START TX … FC16 …`** hex + **`H100_START RX …`** / `TIMEOUT`
    - `H100_START result=ACK|EXC6|TIMEOUT|… (FC16 qty1)`
-   - Po **ACK**: hned `H100 confirm 1/2` + `2/2` → **`H100=`** / **`CHANGE`** (+ H101/H1/H500–506), i když == zápis; auto-clear **1→0** vytiskne obě; `poll RESUMED`
+   - Po confirm: **`=== ERR_DUMP (post-FC16 Start) ===`** (kandidáti + sparse) → `Hnnn=` / `ERR_ADDR=`
    - Bez **tap** řádku = touch path; tap + TX ale silence/EXC = Modbus / busy bus
-7. Volitelně Serial **`h100alt`** — FC16 first, FC06 experiment; u každé metody `→ ACK|EXC6|TIMEOUT`.
-8. Občas **`H100 busy/ex6`** = Modbus Slave Busy — UI **ne** „—“; ≠ `ERROR_ADDR` holding raw.
-9. Quiet error = **holding 500–506** only; starý 10–20 scan jen `verbose` + `poll`.
-10. Pošli řádky `H100=` / `H5xx=` / `ERR5xx=` / `CHANGE` / `H100_START` TX|RX / `result=` / `confirm`.
+7. Ručně **`errdump`** — stejný one-shot lov (když panel Start bez FC16).
+8. Občas **`H100 busy/ex6`** = Modbus Slave Busy — UI **ne** „—“; ≠ `ERR_ADDR` holding raw.
+9. **ERR_DUMP okna:** 0–31, 100–120, 200–220, 400–420, 500–520, 1000–1020, 2000–2020 + sparse 50/150/250/300/350/600/700/800/900/1500/2500/3000.
+10. Pošli řádky `H100=` / `ERR_DUMP` / `Hnnn=` / `ERR_ADDR=` / `CHANGE` / `H100_START` TX|RX / `result=`.
 
-**Očekávání:** quiet poll H100+H500–506; panel Start → H100 **1→0**; LCD/`h100`/`fc16` → FC16 ACK + `H100=` confirm (FC06 nic nedělá).
+**Očekávání:** H100 Start dál funguje; po Start/`1→0` uvidíš **ERR_DUMP** (nejen 500–506); FC06 nic nedělá.
 
 **Tip při samých TIMEOUT:** prohoď **A↔B**, ověř napájení Spaweru, pak baud `4800` / `19200`.
 
@@ -148,10 +148,11 @@ USB 115200, příkaz + Enter (**volitelné**):
 
 | Příkaz | Akce |
 |--------|------|
-| *(auto fast)* | FC03 H1 + 100–101 + **500–506** ~1 s → `H1=` / `H100=` / `H5xx=` / `ERR5xx=` [/ `CHANGE`] |
-| *(LCD Start)* | quiet-bus + **FC16** qty1 H100 toggle → `H100_START tap` + TX/RX hex |
-| `h100` / `start100` / `fc16` | totéž jako LCD Start (**FC16 only**; bez tap řádku) |
+| *(auto fast)* | FC03 H1 + 100–101 + **500–520** ~1 s → `H1=` / `H100=` [/ `CHANGE`]; H5xx jen CHANGE/nonzero |
+| *(LCD Start / panel 1→0)* | po FC16 confirm nebo H100 **1→0** → **`ERR_DUMP`** (`Hnnn=` / `ERR_ADDR=`) |
+| `h100` / `start100` / `fc16` | totéž jako LCD Start (**FC16 only**; bez tap řádku) + ERR_DUMP |
 | `fc16 0` / `fc16 1` | FC16 qty1 s explicitní hodnotou |
+| `errdump` / `err` | ruční one-shot ERR_DUMP (kandidáti + sparse) |
 | `h100alt` | FC16 first, pak FC06 experiment — log `ACK` / `EXC6` / `TIMEOUT` |
 | `fc06` | experiment FC06 (na této pumpě typicky **nic**) |
 | *(auto scan)* | OFF — ručně `poll` → `TEMP_ADDR` / `ERROR_ADDR` |
