@@ -1,4 +1,4 @@
-// ui_test.cpp — Spawer op-test: H1/near/SP + H100/H101/H13 + START/STOP
+// ui_test.cpp — Spawer op-test: IN/OUT + SP ±0.5 + H100/H101/H13 + START/STOP
 #include "ui_test.h"
 
 #include "board_7b.h"
@@ -35,26 +35,32 @@ int16_t s_touchLastX = 0;
 int16_t s_touchLastY = 0;
 
 lv_obj_t *s_lblTitle = nullptr;
-lv_obj_t *s_lblH1 = nullptr;
+lv_obj_t *s_lblOut = nullptr;
+lv_obj_t *s_lblIn = nullptr;
 lv_obj_t *s_lblSp = nullptr;
-lv_obj_t *s_lblNear = nullptr;
 lv_obj_t *s_lblH100 = nullptr;
 lv_obj_t *s_lblH101 = nullptr;
 lv_obj_t *s_lblH13 = nullptr;
 lv_obj_t *s_lblStatus = nullptr;
 lv_obj_t *s_btnStart = nullptr;
 lv_obj_t *s_btnStop = nullptr;
+lv_obj_t *s_btnSpDown = nullptr;
+lv_obj_t *s_btnSpUp = nullptr;
 
 volatile bool s_startReq = false;
 volatile bool s_stopReq = false;
+volatile bool s_spDownReq = false;
+volatile bool s_spUpReq = false;
 
-// Last snap fields (for uiTestUpdateBasic / uiTestSetNear partial updates)
+bool s_writeBusy = false;
+uint32_t s_lastTapMs = 0;
+static const uint32_t TAP_DEBOUNCE_MS = 450;
+
 UiTestSnap s_last = {};
 
-// Cache — avoid invalidate / FB swap when Modbus values unchanged (flicker)
-char s_txtH1[56] = "";
+char s_txtOut[64] = "";
+char s_txtIn[64] = "";
 char s_txtSp[64] = "";
-char s_txtNear[96] = "";
 char s_txtH100[32] = "";
 char s_txtH101[32] = "";
 char s_txtH13[72] = "";
@@ -131,16 +137,52 @@ void touchRead(lv_indev_t *indev, lv_indev_data_t *data) {
   data->point.y = s_touchLastY;
 }
 
+bool acceptTap(void) {
+  if (s_writeBusy) return false;
+  uint32_t now = millis();
+  if (s_lastTapMs != 0 && (now - s_lastTapMs) < TAP_DEBOUNCE_MS) return false;
+  s_lastTapMs = now;
+  return true;
+}
+
 void onStartClicked(lv_event_t *e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  if (!acceptTap()) {
+    Serial.println(F("H100_START tap IGNORED (busy/debounce)"));
+    return;
+  }
   s_startReq = true;
   Serial.println(F("H100_START tap (UI CLICKED)"));
 }
 
 void onStopClicked(lv_event_t *e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  if (!acceptTap()) {
+    Serial.println(F("H100_STOP tap IGNORED (busy/debounce)"));
+    return;
+  }
   s_stopReq = true;
   Serial.println(F("H100_STOP tap (UI CLICKED)"));
+}
+
+void onSpDownClicked(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  if (!acceptTap()) {
+    Serial.println(F("SP- tap IGNORED (busy/debounce)"));
+    return;
+  }
+  s_spDownReq = true;
+  Serial.println(F("SP- tap (UI CLICKED −0.5)"));
+}
+
+void onSpUpClicked(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  if (!acceptTap()) {
+    Serial.println(F("SP+ tap IGNORED (busy/debounce)"));
+    return;
+  }
+  s_spUpReq = true;
+  Serial.println(F("SP+ tap (UI CLICKED +0.5)"));
 }
 
 void setLabelIfChanged(lv_obj_t *lbl, char *cache, size_t cacheCap, const char *text) {
@@ -157,60 +199,80 @@ void fmtTempC(char *buf, size_t cap, uint16_t raw) {
   snprintf(buf, cap, "%d.%d", whole, frac);
 }
 
+lv_obj_t *makeSpButton(lv_obj_t *scr, const char *txt, lv_align_t align, int32_t x,
+                       int32_t y, lv_event_cb_t cb) {
+  lv_obj_t *btn = lv_button_create(scr);
+  lv_obj_set_size(btn, 100, 72);
+  lv_obj_align(btn, align, x, y);
+  lv_obj_set_style_bg_color(btn, lv_color_hex(0x3A4A5C), 0);
+  lv_obj_set_style_bg_color(btn, lv_color_hex(0x2A3542), LV_STATE_PRESSED);
+  lv_obj_set_style_radius(btn, 12, 0);
+  lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *lbl = lv_label_create(btn);
+  lv_label_set_text(lbl, txt);
+  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_32, 0);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_center(lbl);
+  lv_obj_clear_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
+  return btn;
+}
+
 void buildScreen() {
   lv_obj_t *scr = lv_screen_active();
   lv_obj_set_style_bg_color(scr, lv_color_hex(0x0E1116), 0);
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
   s_lblTitle = lv_label_create(scr);
-  lv_label_set_text(s_lblTitle, "Spawer — op test (temps + START/STOP)");
+  lv_label_set_text(s_lblTitle, "Spawer — IN / OUT / SP + START/STOP");
   lv_obj_set_style_text_color(s_lblTitle, lv_color_hex(0xE8EEF7), 0);
   lv_obj_set_style_text_font(s_lblTitle, &lv_font_montserrat_28, 0);
-  lv_obj_align(s_lblTitle, LV_ALIGN_TOP_MID, 0, 12);
+  lv_obj_align(s_lblTitle, LV_ALIGN_TOP_MID, 0, 10);
 
-  s_lblH1 = lv_label_create(scr);
-  lv_label_set_text(s_lblH1, "H1  —.- °C");
-  strncpy(s_txtH1, "H1  —.- °C", sizeof(s_txtH1) - 1);
-  lv_obj_set_style_text_color(s_lblH1, lv_color_hex(0x7FDBCA), 0);
-  lv_obj_set_style_text_font(s_lblH1, &lv_font_montserrat_40, 0);
-  lv_obj_align(s_lblH1, LV_ALIGN_TOP_LEFT, 40, 58);
+  s_lblOut = lv_label_create(scr);
+  lv_label_set_text(s_lblOut, "OUT H1  —.- °C");
+  strncpy(s_txtOut, "OUT H1  —.- °C", sizeof(s_txtOut) - 1);
+  lv_obj_set_style_text_color(s_lblOut, lv_color_hex(0x7FDBCA), 0);
+  lv_obj_set_style_text_font(s_lblOut, &lv_font_montserrat_32, 0);
+  lv_obj_align(s_lblOut, LV_ALIGN_TOP_LEFT, 40, 52);
+
+  s_lblIn = lv_label_create(scr);
+  lv_label_set_text(s_lblIn, "IN  H2  —.- °C");
+  strncpy(s_txtIn, "IN  H2  —.- °C", sizeof(s_txtIn) - 1);
+  lv_obj_set_style_text_color(s_lblIn, lv_color_hex(0x7EB6FF), 0);
+  lv_obj_set_style_text_font(s_lblIn, &lv_font_montserrat_32, 0);
+  lv_obj_align(s_lblIn, LV_ALIGN_TOP_LEFT, 520, 52);
 
   s_lblSp = lv_label_create(scr);
-  lv_label_set_text(s_lblSp, "SP?  —.- °C  (poll H2-H5)");
-  strncpy(s_txtSp, "SP?  —.- °C  (poll H2-H5)", sizeof(s_txtSp) - 1);
+  lv_label_set_text(s_lblSp, "SP  H0  —.- °C");
+  strncpy(s_txtSp, "SP  H0  —.- °C", sizeof(s_txtSp) - 1);
   lv_obj_set_style_text_color(s_lblSp, lv_color_hex(0xF4A261), 0);
-  lv_obj_set_style_text_font(s_lblSp, &lv_font_montserrat_28, 0);
-  lv_obj_align(s_lblSp, LV_ALIGN_TOP_LEFT, 40, 112);
+  lv_obj_set_style_text_font(s_lblSp, &lv_font_montserrat_32, 0);
+  lv_obj_align(s_lblSp, LV_ALIGN_TOP_LEFT, 40, 108);
 
-  s_lblNear = lv_label_create(scr);
-  lv_label_set_text(s_lblNear, "H2-H5  —");
-  strncpy(s_txtNear, "H2-H5  —", sizeof(s_txtNear) - 1);
-  lv_obj_set_style_text_color(s_lblNear, lv_color_hex(0xA5B4C8), 0);
-  lv_obj_set_style_text_font(s_lblNear, &lv_font_montserrat_18, 0);
-  lv_obj_align(s_lblNear, LV_ALIGN_TOP_LEFT, 40, 152);
-  lv_obj_set_width(s_lblNear, BOARD_PANEL_W - 80);
-  lv_label_set_long_mode(s_lblNear, LV_LABEL_LONG_WRAP);
+  s_btnSpDown = makeSpButton(scr, "−", LV_ALIGN_TOP_LEFT, 420, 98, onSpDownClicked);
+  s_btnSpUp = makeSpButton(scr, "+", LV_ALIGN_TOP_LEFT, 540, 98, onSpUpClicked);
 
   s_lblH100 = lv_label_create(scr);
   lv_label_set_text(s_lblH100, "H100  —");
   strncpy(s_txtH100, "H100  —", sizeof(s_txtH100) - 1);
   lv_obj_set_style_text_color(s_lblH100, lv_color_hex(0xFFD166), 0);
-  lv_obj_set_style_text_font(s_lblH100, &lv_font_montserrat_32, 0);
-  lv_obj_align(s_lblH100, LV_ALIGN_TOP_LEFT, 40, 192);
+  lv_obj_set_style_text_font(s_lblH100, &lv_font_montserrat_28, 0);
+  lv_obj_align(s_lblH100, LV_ALIGN_TOP_LEFT, 40, 178);
 
   s_lblH101 = lv_label_create(scr);
   lv_label_set_text(s_lblH101, "H101  —");
   strncpy(s_txtH101, "H101  —", sizeof(s_txtH101) - 1);
   lv_obj_set_style_text_color(s_lblH101, lv_color_hex(0xA5B4C8), 0);
-  lv_obj_set_style_text_font(s_lblH101, &lv_font_montserrat_28, 0);
-  lv_obj_align(s_lblH101, LV_ALIGN_TOP_LEFT, 320, 196);
+  lv_obj_set_style_text_font(s_lblH101, &lv_font_montserrat_24, 0);
+  lv_obj_align(s_lblH101, LV_ALIGN_TOP_LEFT, 280, 182);
 
   s_lblH13 = lv_label_create(scr);
   lv_label_set_text(s_lblH13, "H13  —");
   strncpy(s_txtH13, "H13  —", sizeof(s_txtH13) - 1);
   lv_obj_set_style_text_color(s_lblH13, lv_color_hex(0xFF6B6B), 0);
-  lv_obj_set_style_text_font(s_lblH13, &lv_font_montserrat_22, 0);
-  lv_obj_align(s_lblH13, LV_ALIGN_TOP_LEFT, 40, 240);
+  lv_obj_set_style_text_font(s_lblH13, &lv_font_montserrat_18, 0);
+  lv_obj_align(s_lblH13, LV_ALIGN_TOP_LEFT, 40, 220);
   lv_obj_set_width(s_lblH13, BOARD_PANEL_W - 80);
 
   s_btnStart = lv_button_create(scr);
@@ -247,11 +309,12 @@ void buildScreen() {
   lv_obj_clear_flag(btnStopLbl, LV_OBJ_FLAG_CLICKABLE);
 
   s_lblStatus = lv_label_create(scr);
-  const char *st0 = "START=FC16 H100=1  |  STOP=FC16 H100=0  |  H13=fault bits";
+  const char *st0 =
+      "OUT/IN remap in main.cpp  |  SP ±FC16 ±0.5  |  START/STOP=FC16 H100";
   lv_label_set_text(s_lblStatus, st0);
   strncpy(s_txtStatus, st0, sizeof(s_txtStatus) - 1);
   lv_obj_set_style_text_color(s_lblStatus, lv_color_hex(0x8A93A3), 0);
-  lv_obj_set_style_text_font(s_lblStatus, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_font(s_lblStatus, &lv_font_montserrat_14, 0);
   lv_obj_align(s_lblStatus, LV_ALIGN_BOTTOM_MID, 0, -10);
   lv_obj_set_width(s_lblStatus, BOARD_PANEL_W - 80);
   lv_label_set_long_mode(s_lblStatus, LV_LABEL_LONG_WRAP);
@@ -332,7 +395,7 @@ bool uiTestInit(void) {
   s_touchArmed = true;
 
   s_ok = true;
-  Serial.printf("[UI] OK %dx%d touch=%s (op-test START/STOP + H13, FULL FB)\n",
+  Serial.printf("[UI] OK %dx%d touch=%s (IN/OUT/SP ±0.5 + START/STOP)\n",
                 BOARD_PANEL_W, BOARD_PANEL_H, s_touch ? "GT911" : "none");
   return true;
 }
@@ -351,51 +414,37 @@ void uiTestTick(void) {
 void uiTestUpdate(const UiTestSnap *snap) {
   if (!s_ok || !snap) return;
   s_last = *snap;
-  s_last.status = nullptr;  // don't keep dangling ptr
+  s_last.status = nullptr;
 
   char buf[96];
   char t[16];
 
-  if (snap->haveH1) {
-    fmtTempC(t, sizeof(t), snap->h1);
-    snprintf(buf, sizeof(buf), "H1  %s °C  (raw %u)", t, (unsigned)snap->h1);
+  if (snap->haveOutlet) {
+    fmtTempC(t, sizeof(t), snap->outletRaw);
+    snprintf(buf, sizeof(buf), "OUT H%u  %s °C", (unsigned)snap->outletAddr, t);
   } else {
-    snprintf(buf, sizeof(buf), "H1  —.- °C");
+    snprintf(buf, sizeof(buf), "OUT H%u  —.- °C",
+             (unsigned)(snap->outletAddr ? snap->outletAddr : 1));
   }
-  setLabelIfChanged(s_lblH1, s_txtH1, sizeof(s_txtH1), buf);
+  setLabelIfChanged(s_lblOut, s_txtOut, sizeof(s_txtOut), buf);
 
-  if (snap->haveSp && snap->spAddr != 0) {
-    fmtTempC(t, sizeof(t), snap->spRaw);
-    snprintf(buf, sizeof(buf), "SP? H%u  %s °C  (raw %u)", (unsigned)snap->spAddr, t,
-             (unsigned)snap->spRaw);
+  if (snap->haveInlet) {
+    fmtTempC(t, sizeof(t), snap->inletRaw);
+    snprintf(buf, sizeof(buf), "IN  H%u  %s °C", (unsigned)snap->inletAddr, t);
   } else {
-    snprintf(buf, sizeof(buf), "SP?  —.- °C  (poll H2-H5)");
+    snprintf(buf, sizeof(buf), "IN  H%u  —.- °C",
+             (unsigned)(snap->inletAddr ? snap->inletAddr : 2));
+  }
+  setLabelIfChanged(s_lblIn, s_txtIn, sizeof(s_txtIn), buf);
+
+  if (snap->haveSp) {
+    fmtTempC(t, sizeof(t), snap->spRaw);
+    snprintf(buf, sizeof(buf), "SP  H%u  %s °C", (unsigned)snap->spAddr, t);
+  } else {
+    snprintf(buf, sizeof(buf), "SP  H%u  —.- °C",
+             (unsigned)(snap->spAddr ? snap->spAddr : 0));
   }
   setLabelIfChanged(s_lblSp, s_txtSp, sizeof(s_txtSp), buf);
-
-  {
-    char nearBuf[96];
-    size_t pos = 0;
-    pos += (size_t)snprintf(nearBuf + pos, sizeof(nearBuf) - pos, "H2-H5");
-    bool any = false;
-    for (int i = 0; i < 4; i++) {
-      if (!snap->haveNear[i]) continue;
-      any = true;
-      uint16_t addr = (uint16_t)(2 + i);
-      uint16_t raw = snap->nearRaw[i];
-      if (raw >= 150 && raw <= 350) {
-        fmtTempC(t, sizeof(t), raw);
-        pos += (size_t)snprintf(nearBuf + pos, sizeof(nearBuf) - pos, "  H%u=%s",
-                                (unsigned)addr, t);
-      } else {
-        pos += (size_t)snprintf(nearBuf + pos, sizeof(nearBuf) - pos, "  H%u=%u",
-                                (unsigned)addr, (unsigned)raw);
-      }
-      if (pos >= sizeof(nearBuf) - 1) break;
-    }
-    if (!any) snprintf(nearBuf, sizeof(nearBuf), "H2-H5  —");
-    setLabelIfChanged(s_lblNear, s_txtNear, sizeof(s_txtNear), nearBuf);
-  }
 
   if (snap->haveH100) {
     snprintf(buf, sizeof(buf), "H100  %u", (unsigned)snap->h100);
@@ -459,8 +508,9 @@ void uiTestUpdateBasic(uint16_t h1, bool haveH1, uint16_t h100, bool haveH100,
                        uint16_t h101, bool haveH101, uint16_t h13, bool haveH13,
                        const char *status) {
   UiTestSnap s = s_last;
-  s.h1 = h1;
-  s.haveH1 = haveH1;
+  s.outletRaw = h1;
+  s.haveOutlet = haveH1;
+  if (s.outletAddr == 0) s.outletAddr = 1;
   s.h100 = h100;
   s.haveH100 = haveH100;
   s.h101 = h101;
@@ -471,30 +521,42 @@ void uiTestUpdateBasic(uint16_t h1, bool haveH1, uint16_t h100, bool haveH100,
   uiTestUpdate(&s);
 }
 
-void uiTestSetNear(const uint16_t nearRaw[4], const bool haveNear[4],
-                   uint16_t spAddr, uint16_t spRaw, bool haveSp) {
-  UiTestSnap s = s_last;
-  for (int i = 0; i < 4; i++) {
-    s.nearRaw[i] = nearRaw ? nearRaw[i] : 0;
-    s.haveNear[i] = haveNear ? haveNear[i] : false;
-  }
-  s.spAddr = spAddr;
-  s.spRaw = spRaw;
-  s.haveSp = haveSp;
-  s.status = nullptr;
-  uiTestUpdate(&s);
-}
-
 bool uiTestConsumeStartRequest(void) {
   if (!s_startReq) return false;
   s_startReq = false;
+  if (s_writeBusy) return false;
   return true;
 }
 
 bool uiTestConsumeStopRequest(void) {
   if (!s_stopReq) return false;
   s_stopReq = false;
+  if (s_writeBusy) return false;
   return true;
+}
+
+bool uiTestConsumeSpDownRequest(void) {
+  if (!s_spDownReq) return false;
+  s_spDownReq = false;
+  if (s_writeBusy) return false;
+  return true;
+}
+
+bool uiTestConsumeSpUpRequest(void) {
+  if (!s_spUpReq) return false;
+  s_spUpReq = false;
+  if (s_writeBusy) return false;
+  return true;
+}
+
+void uiTestSetWriteBusy(bool busy) {
+  s_writeBusy = busy;
+  if (busy) {
+    s_startReq = false;
+    s_stopReq = false;
+    s_spDownReq = false;
+    s_spUpReq = false;
+  }
 }
 
 void uiTestSetStatus(const char *status) {

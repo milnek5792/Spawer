@@ -4,27 +4,29 @@
  * UART RS485: RX=GPIO15, TX=GPIO16 (auto DE/RE)
  * USB log: 115200 (Serial zůstává)
  *
- * LCD (LVGL) op-test: H1 °C, SP? (H2–H5), H100/H101, H13 bits + START + STOP
- *   → START = quiet-bus FC16 H100=1; STOP = FC16 H100=0
- *   Milan: FC06 na této pumpě nic nedělá — Start/Stop = FC16 only
+ * LCD (LVGL) op-test: OUT/IN temps + SP ±0.5 + H100/H101/H13 + START/STOP
+ *   → START = quiet-bus FC16 H100=1 (retries); STOP = FC16 H100=0
+ *   → SP −/+ = FC16 writable holding ±0.5 °C (raw×0.1; default H0)
+ *   Milan: FC06 na této pumpě nic nedělá — Start/Stop/SP = FC16 only
  *   Milan: panel Start → H100 CHANGE 1→0; LCD START/STOP → H100_START / H100_STOP
  *   Milan DIFFAULT: H13=64 (bit6) ≈ panel „error 6“ — LCD + Serial bits=
+ *   Milan: Start/Stop flaky → longer quiet-bus + 2–3 FC16 retries + in-flight lock
  *
- * Default (Spawer mód) — quiet Serial + fast H100/H1/H101 + DIFF watch:
- *   - Serial quiet: jen H1= / H100= / H101= [/CHANGE], H7/H12/H13/H20/H23 CHANGE,
- *     H13=… bits=N, H100_START (+ TX/RX hex), H100 busy/ex6 (rate-limited),
+ * Default (Spawer mód) — quiet Serial + fast H100/temps + DIFF watch:
+ *   - Serial quiet: OUT=/IN=/SP=/H100=/H101= [/CHANGE], H7/H12/H13/H20/H23 CHANGE,
+ *     H13=… bits=N, H100_START/STOP (+ TX/RX hex), SP_SET, busy/ex6 (rate-limited),
  *     alive/SILENT — NE flood „fail“
  *   - Modbus EXC 0x06 (Slave Device Busy) ≠ ERROR_ADDR holding raw=6
  *   - EXC6 / TO: keep last good haveH100 (UI neznámé jen když ještě nikdy OK);
- *     2–3 retry s backoff 100–300 ms; stagger H100 ↔ H1
+ *     2–3 retry s backoff; stagger H100 ↔ temps
  *   - verbose: dump bloků + TEMP_ADDR / ERROR_ADDR + pasivní hex frames
  *   - aktivní Modbus poll (slave 1, 9600 8N1):
  *       fast ~1.0 s (priorita H100):
  *         FC03 holding 100–101 (qty 2) → H100= / H101=
- *         settle, pak FC03 holding 1 → H1=
+ *         settle, pak FC03 holding 0–5 → OUT/IN/SP (remap constants)
  *         settle, FC03 holding 7–23 → H7/H12/H13/H20/H23 CHANGE (+ H13 bits)
  *         settle, FC03 holding 500–520 (quiet CHANGE/nonzero) — H500–506 nestačilo
- *         H0 volitelně OFF (MB_H0_POLL_ENABLED)
+ *         H0 = SP candidate (always in 0–5 block)
  *       SCAN6 (quiet, jen holding raw=6):
  *         FC03 bloky qty 16 přes 0–2047; TO bloky přeskočit; stop po N× TO v řadě
  *         výpis jen ERR6_ADDR=nnn + Hnnn=6 (jednou na hit)
@@ -79,10 +81,10 @@ static const bool AUTO_START_PROBE_ENABLED = false;
 
 // Modbus RTU master — fast H100/H1/H101; light temp/error scan OFF (nehladoví H100)
 static const uint8_t MB_SLAVE = 1;
-static const bool MB_H0_POLL_ENABLED = false;       // volitelně H0 — default OFF
+static const bool MB_H0_POLL_ENABLED = false;       // legacy single H0; temps use 0–5 block
 static const bool MB_LIGHT_SCAN_ENABLED = false;    // auto TEMP/ERROR scan OFF (ručně `poll`)
-static const uint32_t MB_FAST_POLL_MS = 1000;       // H100-101 + H1 ~1 s (méně hammer při busy)
-static const uint32_t MB_FAST_INTER_MS = 200;       // mezera H100 blok ↔ H1 (bus settle)
+static const uint32_t MB_FAST_POLL_MS = 1000;       // H100-101 + temps ~1 s (méně hammer při busy)
+static const uint32_t MB_FAST_INTER_MS = 200;       // mezera H100 blok ↔ temps (bus settle)
 static const uint32_t MB_POLL_INTERVAL_MS = 120000; // kdyby scan ON — velmi pomalu
 static const uint32_t MB_RESPONSE_TIMEOUT_MS = 600;
 static const uint32_t MB_INTER_REQ_MS = 300;  // turnaround 200–500 ms + RX wait
@@ -91,14 +93,29 @@ static const uint32_t MB_H100_WRITE_SETTLE_MS = 800; // legacy settle (alt metho
 static const uint32_t MB_H100_CONFIRM_EARLY_MS = 250; // 1. FC03 po zápisu (chytit val=1 před clear)
 static const uint32_t MB_H100_CONFIRM_LATE_MS = 500;  // 2. sample — auto-clear 1→0
 static const uint32_t MB_H100_POLL_RESUME_MS = 300;   // po confirm hned znovu fast poll
-static const uint32_t MB_QUIET_BUS_MS = 80;          // ≥50–100 ms silent před zápisem (3.5T + margin)
-static const uint32_t MB_QUIET_BUS_MAX_MS = 500;     // max čekání na ticho (panel může mluvit)
+// Milan: Start/Stop often needs several tries — longer quiet + retries
+static const uint32_t MB_QUIET_BUS_MS = 200;         // silent before FC16 (was 80)
+static const uint32_t MB_QUIET_BUS_MAX_MS = 1200;    // max wait for quiet (was 500)
+static const uint8_t MB_H100_WRITE_TRIES = 3;        // FC16 attempts (1 + 2 retry on EXC6/TO)
+static const uint32_t MB_H100_WRITE_RETRY_MS = 350;  // backoff between FC16 retries
 static const uint32_t MB_BUSY_BACKOFF_MS = 200;      // EXC 0x06 / TO retry backoff (100–300)
 static const uint8_t MB_BUSY_RETRIES = 3;            // pokusy na cyklus (1 + 2 retry)
 static const uint8_t MB_EXC_SLAVE_BUSY = 0x06;       // Modbus exception: Slave Device Busy
 static const uint16_t MB_START_WRITE_VALUE = 1;
 static const uint16_t MB_H100_START_ADDR = 100;      // 0-based holding 100 (ne 40001)
 static const uint16_t MB_H100_START_VALUE = 1;       // panel Start → H100 CHANGE 1→0
+// === Remap if panel labels disagree (0-based holdings; raw × 0.1 = °C) ===
+// Live Milan: H1≈190–200 water/outlet-ish; H2≈180–190 inlet pair; H0≈200–210 SP-like.
+// Fairland FC04 inlet/outlet timeout on Spawer — sensors live in holdings.
+static const uint16_t MB_OUTLET_ADDR = 1;            // OUT candidate (H1)
+static const uint16_t MB_INLET_ADDR = 2;             // IN  candidate (H2)
+static const uint16_t MB_SP_ADDR = 0;                // SP  writable candidate (H0)
+static const uint16_t MB_SP_STEP_RAW = 5;            // 0.5 °C at ×0.1
+static const uint16_t MB_SP_MIN_RAW = 150;           // 15.0 °C
+static const uint16_t MB_SP_MAX_RAW = 400;           // 40.0 °C
+// Poll block must cover OUT/IN/SP addresses (0..5 covers defaults).
+static const uint16_t MB_TEMP_BLOCK_START = 0;
+static const uint16_t MB_TEMP_BLOCK_QTY = 6;         // H0..H5
 static const size_t MAX_FRAME = 256;
 static const size_t PROP_LEN_MIN = 70;
 static const size_t PROP_LEN_MAX = 90;
@@ -210,7 +227,8 @@ static const size_t MB_START_CANDIDATES_N =
 
 static const MbReadReq MB_H0_REQ = {0x03, 0, 1, "FC03 holding 0"};
 static const MbReadReq MB_H1_REQ = {0x03, 1, 1, "FC03 holding 1"};  // fallback
-static const MbReadReq MB_H1_5_BLOCK = {0x03, 1, 5, "FC03 holding 1-5"};  // H1+SP?
+static const MbReadReq MB_TEMP_BLOCK = {
+    0x03, MB_TEMP_BLOCK_START, MB_TEMP_BLOCK_QTY, "FC03 holding 0-5 (IN/OUT/SP)"};
 static const MbReadReq MB_H100_BLOCK = {0x03, 100, 2, "FC03 holding 100-101"};
 static const MbReadReq MB_DIFFWATCH_BLOCK = {
     0x03, MB_DIFFWATCH_START, MB_DIFFWATCH_QTY, "FC03 holding 7-23 DIFF watch"};
@@ -248,9 +266,9 @@ static uint32_t mbCycleCount = 0;
 static uint32_t mbOkCount = 0;
 static uint32_t mbTimeoutCount = 0;
 static uint16_t lastH0 = 0;
-static uint16_t lastH1 = 0;
-static uint16_t lastNear[4] = {0, 0, 0, 0};  // H2..H5
-static uint16_t lastSpAddr = 0;
+static uint16_t lastH1 = 0;  // alias outlet when MB_OUTLET_ADDR==1
+static uint16_t lastOutlet = 0;
+static uint16_t lastInlet = 0;
 static uint16_t lastSpRaw = 0;
 static uint16_t lastH100 = 0;
 static uint16_t lastH101 = 0;
@@ -259,13 +277,15 @@ static uint16_t lastH13 = 0;
 static uint16_t lastH500[MB_H500_QTY] = {0};
 static bool haveH0 = false;
 static bool haveH1 = false;
-static bool haveNear[4] = {false, false, false, false};
+static bool haveOutlet = false;
+static bool haveInlet = false;
 static bool haveSp = false;
 static bool haveH100 = false;
 static bool haveH101 = false;
 static bool haveDiffWatch = false;
 static bool haveH13 = false;
 static bool haveH500 = false;
+static bool mbWriteInFlight = false;  // H100 / SP FC16 — no overlapping writes
 static bool mbReqSkip[MB_REQS_N] = {false};
 static bool mbErrDumpBusy = false;
 static uint32_t mbLastErrDumpMs = 0;
@@ -1125,7 +1145,7 @@ static void emitHoldingWatchForce(const char *tag, uint16_t v, uint16_t *last,
   *have = true;
 }
 
-// Quiet: first sample + CHANGE only (H2–H5 — keep Serial calm).
+// Quiet: first sample + CHANGE only (temps / SP — keep Serial calm).
 static void emitHoldingWatchQuiet(const char *tag, uint16_t v, uint16_t *last,
                                   bool *have) {
   if (!*have) {
@@ -1137,59 +1157,50 @@ static void emitHoldingWatchQuiet(const char *tag, uint16_t v, uint16_t *last,
   *have = true;
 }
 
-// Fairland-like SP?: prefer H2 then H3..H5 when raw looks like temp (≠ H1).
-static void pickSetpointFromNear(void) {
-  haveSp = false;
-  lastSpAddr = 0;
-  lastSpRaw = 0;
-  for (int pass = 0; pass < 2; pass++) {
-    for (int i = 0; i < 4; i++) {
-      if (!haveNear[i]) continue;
-      uint16_t raw = lastNear[i];
-      if (!isCandidateTemp(raw)) continue;
-      if (pass == 0 && haveH1 && raw == lastH1) continue;
-      lastSpAddr = (uint16_t)(2 + i);
-      lastSpRaw = raw;
-      haveSp = true;
-      return;
-    }
-  }
+static int tempBlockIndex(uint16_t addr) {
+  if (addr < MB_TEMP_BLOCK_START) return -1;
+  uint16_t off = (uint16_t)(addr - MB_TEMP_BLOCK_START);
+  if (off >= MB_TEMP_BLOCK_QTY) return -1;
+  return (int)off;
 }
 
-static void absorbH1_5Block(const uint16_t *vals) {
+// Map remappable OUT/IN/SP from FC03 holding 0–5 block (vals[0]=H0 …).
+static void absorbTempBlock(const uint16_t *vals) {
   if (!vals) return;
-  emitHoldingWatch("H1", vals[0], &lastH1, &haveH1);
-  char tag[8];
-  for (int i = 0; i < 4; i++) {
-    snprintf(tag, sizeof(tag), "H%u", (unsigned)(2 + i));
-    emitHoldingWatchQuiet(tag, vals[1 + i], &lastNear[i], &haveNear[i]);
-  }
-  pickSetpointFromNear();
-  if (haveSp) {
-    static uint16_t prevSpAddr = 0;
-    static uint16_t prevSpRaw = 0;
-    static bool hadSpLog = false;
-    if (!hadSpLog || prevSpAddr != lastSpAddr || prevSpRaw != lastSpRaw) {
-      Serial.printf("SP? H%u=%u (raw×0.1 °C)\n", (unsigned)lastSpAddr,
-                    (unsigned)lastSpRaw);
-      prevSpAddr = lastSpAddr;
-      prevSpRaw = lastSpRaw;
-      hadSpLog = true;
+  int iOut = tempBlockIndex(MB_OUTLET_ADDR);
+  int iIn = tempBlockIndex(MB_INLET_ADDR);
+  int iSp = tempBlockIndex(MB_SP_ADDR);
+
+  if (iOut >= 0) {
+    emitHoldingWatchQuiet("OUT", vals[iOut], &lastOutlet, &haveOutlet);
+    // Keep H1 alias for alive / legacy when outlet mapping is H1
+    if (MB_OUTLET_ADDR == 1) {
+      lastH1 = lastOutlet;
+      haveH1 = haveOutlet;
     }
   }
-  uiTestSetNear(lastNear, haveNear, lastSpAddr, lastSpRaw, haveSp);
+  if (iIn >= 0) {
+    emitHoldingWatchQuiet("IN", vals[iIn], &lastInlet, &haveInlet);
+  }
+  if (iSp >= 0) {
+    emitHoldingWatchQuiet("SP", vals[iSp], &lastSpRaw, &haveSp);
+    if (MB_SP_ADDR == 0) {
+      lastH0 = lastSpRaw;
+      haveH0 = haveSp;
+    }
+  }
 }
 
 static void pushUiSnap(const char *status) {
   UiTestSnap s = {};
-  s.h1 = lastH1;
-  s.haveH1 = haveH1;
-  for (int i = 0; i < 4; i++) {
-    s.nearRaw[i] = lastNear[i];
-    s.haveNear[i] = haveNear[i];
-  }
-  s.spAddr = lastSpAddr;
+  s.outletRaw = lastOutlet;
+  s.outletAddr = MB_OUTLET_ADDR;
+  s.haveOutlet = haveOutlet;
+  s.inletRaw = lastInlet;
+  s.inletAddr = MB_INLET_ADDR;
+  s.haveInlet = haveInlet;
   s.spRaw = lastSpRaw;
+  s.spAddr = MB_SP_ADDR;
   s.haveSp = haveSp;
   s.h100 = lastH100;
   s.haveH100 = haveH100;
@@ -2037,15 +2048,20 @@ static void h100ConfirmSample(uint16_t expectWrite, const char *phase) {
 
   delayPumpUi(MB_FAST_INTER_MS);
 
-  uint16_t v15[5] = {0};
+  uint16_t vTemp[6] = {0};
   uint8_t exc1 = 0;
-  MbQuietStatus st1 = mbReadHoldingsQuietRetry(MB_H1_5_BLOCK, v15, 5, &exc1);
+  MbQuietStatus st1 =
+      mbReadHoldingsQuietRetry(MB_TEMP_BLOCK, vTemp, MB_TEMP_BLOCK_QTY, &exc1);
   if (st1 == MbQuietStatus::Ok) {
-    absorbH1_5Block(v15);
+    absorbTempBlock(vTemp);
   } else {
     uint16_t v1 = 0;
     if (mbReadHoldingsQuietRetry(MB_H1_REQ, &v1, 1, &exc1) == MbQuietStatus::Ok) {
       emitHoldingWatch("H1", v1, &lastH1, &haveH1);
+      if (MB_OUTLET_ADDR == 1) {
+        lastOutlet = v1;
+        haveOutlet = true;
+      }
     }
   }
 
@@ -2093,48 +2109,96 @@ static void h100WriteEndWindow(uint16_t expectWrite) {
   silentAnnounced = false;
 }
 
-// UI START/STOP + Serial: quiet-bus + FC16 qty1. START=1, STOP=0 (no toggle).
+static bool writeBeginGuard(const char *why) {
+  if (mbWriteInFlight) {
+    Serial.printf("WRITE busy — skip %s (in flight)\n", why ? why : "?");
+    uiTestSetStatus("WRITE busy — wait…");
+    return false;
+  }
+  mbWriteInFlight = true;
+  uiTestSetWriteBusy(true);
+  return true;
+}
+
+static void writeEndGuard(void) {
+  mbWriteInFlight = false;
+  uiTestSetWriteBusy(false);
+}
+
+// FC16 with quiet-bus + retries on EXC6 / TIMEOUT (Milan flaky Start/Stop).
+static MbWriteResult mbFc16WithRetries(uint16_t addr, uint16_t value,
+                                       const char *tag) {
+  MbWriteResult wr = MbWriteResult::Timeout;
+  for (uint8_t attempt = 1; attempt <= MB_H100_WRITE_TRIES; attempt++) {
+    char st[96];
+    snprintf(st, sizeof(st), "%s try %u/%u quiet+FC16…", tag ? tag : "FC16",
+             (unsigned)attempt, (unsigned)MB_H100_WRITE_TRIES);
+    uiTestSetStatus(st);
+    pushUiSnap(st);
+
+    uint16_t v = value;
+    wr = mbWriteMultipleRegisterTagged(addr, 1, &v, tag, true);
+    Serial.printf("%s try %u/%u → %s (FC16 holding[%u]=%u)\n", tag ? tag : "FC16",
+                  (unsigned)attempt, (unsigned)MB_H100_WRITE_TRIES,
+                  mbWriteResultStr(wr), (unsigned)addr, (unsigned)value);
+
+    if (wr == MbWriteResult::Ack) return wr;
+    if (wr != MbWriteResult::ExcBusy && wr != MbWriteResult::Timeout) {
+      return wr;  // EXC other / CRC / FRAME / TX — don't hammer
+    }
+    if (attempt < MB_H100_WRITE_TRIES) {
+      snprintf(st, sizeof(st), "%s %s — retry %u…", tag ? tag : "FC16",
+               mbWriteResultStr(wr), (unsigned)(attempt + 1));
+      uiTestSetStatus(st);
+      delayPumpUi(MB_H100_WRITE_RETRY_MS);
+    }
+  }
+  return wr;
+}
+
+// UI START/STOP + Serial: quiet-bus + FC16 qty1 (+retries). START=1, STOP=0.
 // Milan: FC06 na této pumpě nic nedělá — Start/Stop = FC16 only.
 static void runH100WriteValue(uint16_t value, bool fromUi, const char *tag) {
   const char *kind = (value != 0) ? "START" : "STOP";
   const char *logTag = tag ? tag : ((value != 0) ? "H100_START" : "H100_STOP");
 
+  if (!writeBeginGuard(logTag)) return;
+
   Serial.println();
   Serial.printf("=== %s (%s) ===\n", logTag, fromUi ? "UI" : "Serial");
   if (haveH100) {
     Serial.printf(
-        "plan: quiet-bus + FC16 qty1 slave=%u holding[%u]=%u (%s; H100 now=%u)\n",
+        "plan: quiet≥%lums + FC16×%u slave=%u H%u=%u (%s; H100 now=%u)\n",
+        (unsigned long)MB_QUIET_BUS_MS, (unsigned)MB_H100_WRITE_TRIES,
         (unsigned)MB_SLAVE, (unsigned)MB_H100_START_ADDR, (unsigned)value, kind,
         (unsigned)lastH100);
   } else {
     Serial.printf(
-        "plan: quiet-bus + FC16 qty1 slave=%u holding[%u]=%u (%s; H100 unknown)\n",
+        "plan: quiet≥%lums + FC16×%u slave=%u H%u=%u (%s; H100 unknown)\n",
+        (unsigned long)MB_QUIET_BUS_MS, (unsigned)MB_H100_WRITE_TRIES,
         (unsigned)MB_SLAVE, (unsigned)MB_H100_START_ADDR, (unsigned)value, kind);
   }
   Serial.println(F("Milan: START=1 STOP=0; panel Start often shows H100 1→0 after."));
-  Serial.println(F("Start/Stop = FC16 only (FC06 na teto pumpe nic nedela)."));
+  Serial.println(F("Start/Stop = FC16 only (retries on EXC6/TIMEOUT)."));
 
   char st[96];
-  snprintf(st, sizeof(st), "quiet+FC16 H100=%u (%s) …", (unsigned)value, kind);
+  snprintf(st, sizeof(st), "%s: quiet+FC16 H100=%u …", kind, (unsigned)value);
   uiTestSetStatus(st);
 
   h100WriteBeginWindow(logTag);
-  uint16_t v = value;
-  MbWriteResult wr =
-      mbWriteMultipleRegisterTagged(MB_H100_START_ADDR, 1, &v, logTag, true);
-  Serial.printf("%s result=%s (FC16 qty1 val=%u)\n", logTag, mbWriteResultStr(wr),
-                (unsigned)value);
+  MbWriteResult wr = mbFc16WithRetries(MB_H100_START_ADDR, value, logTag);
 
   h100WriteEndWindow(value);
 
   if (wr == MbWriteResult::Ack) {
-    snprintf(st, sizeof(st), "H100 FC16=%u ACK H100=%u", (unsigned)value,
+    snprintf(st, sizeof(st), "%s OK  FC16 H100=%u → now %u", kind, (unsigned)value,
              (unsigned)(haveH100 ? lastH100 : 0));
   } else {
-    snprintf(st, sizeof(st), "H100 FC16=%u %s — see Serial TX/RX",
-             (unsigned)value, mbWriteResultStr(wr));
+    snprintf(st, sizeof(st), "%s FAIL  FC16=%s (see Serial)", kind,
+             mbWriteResultStr(wr));
   }
   pushUiSnap(st);
+  writeEndGuard();
 }
 
 static void runH100StartWrite(bool fromUi) {
@@ -2145,42 +2209,74 @@ static void runH100StopWrite(bool fromUi) {
   runH100WriteValue(0, fromUi, "H100_STOP");
 }
 
-// Serial fc16 / h100fc16 [0|1]: same FC16 path; no arg = toggle (alias of h100).
+// FC16 setpoint write (raw ×0.1 °C). Confirm with FC03 read of temp block.
+static void runSpWriteRaw(uint16_t raw, bool fromUi) {
+  if (!writeBeginGuard("SP_SET")) return;
+
+  Serial.println();
+  Serial.printf("=== SP_SET (%s) H%u=%u (%.1f °C) ===\n", fromUi ? "UI" : "Serial",
+                (unsigned)MB_SP_ADDR, (unsigned)raw, (double)raw / 10.0);
+
+  char st[96];
+  char t[16];
+  int whole = (int)raw / 10;
+  int frac = (int)raw % 10;
+  snprintf(t, sizeof(t), "%d.%d", whole, frac);
+  snprintf(st, sizeof(st), "SP→%s °C (FC16 H%u) …", t, (unsigned)MB_SP_ADDR);
+  uiTestSetStatus(st);
+  pushUiSnap(st);
+
+  mbScanBusy = true;
+  mbNextFastMs = millis() + 1500;
+  Serial.println(F("  poll PAUSED (SP_SET)"));
+
+  MbWriteResult wr = mbFc16WithRetries(MB_SP_ADDR, raw, "SP_SET");
+
+  delayPumpUi(MB_H100_CONFIRM_EARLY_MS);
+  uint16_t vTemp[6] = {0};
+  uint8_t exc = 0;
+  if (mbReadHoldingsQuietRetry(MB_TEMP_BLOCK, vTemp, MB_TEMP_BLOCK_QTY, &exc) ==
+      MbQuietStatus::Ok) {
+    absorbTempBlock(vTemp);
+  }
+
+  mbScanBusy = false;
+  mbNextFastMs = millis() + MB_H100_POLL_RESUME_MS;
+  Serial.println(F("  poll RESUMED (SP confirm)"));
+
+  if (wr == MbWriteResult::Ack) {
+    snprintf(st, sizeof(st), "SP OK  H%u=%s °C (raw %u)", (unsigned)MB_SP_ADDR, t,
+             (unsigned)(haveSp ? lastSpRaw : raw));
+  } else {
+    snprintf(st, sizeof(st), "SP FAIL  FC16=%s", mbWriteResultStr(wr));
+  }
+  pushUiSnap(st);
+  writeEndGuard();
+}
+
+static void runSpStep(int deltaSteps, bool fromUi) {
+  if (!haveSp) {
+    Serial.println(F("SP step skipped — no SP reading yet"));
+    uiTestSetStatus("SP? — wait for poll…");
+    return;
+  }
+  int32_t next = (int32_t)lastSpRaw + (int32_t)deltaSteps * (int32_t)MB_SP_STEP_RAW;
+  if (next < (int32_t)MB_SP_MIN_RAW) next = MB_SP_MIN_RAW;
+  if (next > (int32_t)MB_SP_MAX_RAW) next = MB_SP_MAX_RAW;
+  if ((uint16_t)next == lastSpRaw) {
+    uiTestSetStatus("SP at limit");
+    return;
+  }
+  runSpWriteRaw((uint16_t)next, fromUi);
+}
+
+// Serial fc16 / h100fc16 [0|1]: same hardened FC16 path; no arg = START.
 static void runH100Fc16Oneshoot(bool haveExplicit, uint16_t value) {
   if (!haveExplicit) {
     runH100StartWrite(false);
     return;
   }
-
-  Serial.println();
-  Serial.println(F("=== H100_FC16 (one-shot qty1) ==="));
-  Serial.println(F("Start = FC16 only (FC06 na teto pumpe nic nedela)."));
-  Serial.println(F("Neni prepínac — napis: fc16   nebo  h100alt"));
-  Serial.printf(
-      "plan: quiet-bus + FC16 qty1 slave=%u holding[%u]=%u (explicit)\n",
-      (unsigned)MB_SLAVE, (unsigned)MB_H100_START_ADDR, (unsigned)value);
-
-  char st[96];
-  snprintf(st, sizeof(st), "quiet+FC16 H100=%u …", (unsigned)value);
-  uiTestSetStatus(st);
-
-  h100WriteBeginWindow("H100_FC16");
-  uint16_t v = value;
-  MbWriteResult wr =
-      mbWriteMultipleRegisterTagged(MB_H100_START_ADDR, 1, &v, "H100_FC16", true);
-  Serial.printf("H100_FC16 result=%s (FC16 qty1 val=%u)\n", mbWriteResultStr(wr),
-                (unsigned)value);
-  h100WriteEndWindow(value);
-
-  if (wr == MbWriteResult::Ack) {
-    snprintf(st, sizeof(st), "H100 FC16=%u ACK H100=%u", (unsigned)value,
-             (unsigned)(haveH100 ? lastH100 : 0));
-  } else {
-    snprintf(st, sizeof(st), "H100 FC16=%u %s — see Serial", (unsigned)value,
-             mbWriteResultStr(wr));
-  }
-  uiTestUpdateBasic(lastH1, haveH1, lastH100, haveH100, lastH101, haveH101, lastH13,
-               haveH13, st);
+  runH100WriteValue(value, false, "H100_FC16");
 }
 
 // Serial fc06 [0|1]: experimentální FC06 (na této pumpě typicky nic).
@@ -2461,20 +2557,25 @@ static void pollFastHoldings() {
   }
   delayPumpUi(settle);
 
-  uint16_t v15[5] = {0};
+  uint16_t vTemp[6] = {0};
   uint8_t exc1 = 0;
-  MbQuietStatus st1 = mbReadHoldingsQuietRetry(MB_H1_5_BLOCK, v15, 5, &exc1);
+  MbQuietStatus st1 =
+      mbReadHoldingsQuietRetry(MB_TEMP_BLOCK, vTemp, MB_TEMP_BLOCK_QTY, &exc1);
   if (st1 == MbQuietStatus::Ok) {
-    absorbH1_5Block(v15);
+    absorbTempBlock(vTemp);
   } else {
     uint16_t v1 = 0;
     if (mbReadHoldingsQuietRetry(MB_H1_REQ, &v1, 1, &exc1) == MbQuietStatus::Ok) {
       emitHoldingWatch("H1", v1, &lastH1, &haveH1);
+      if (MB_OUTLET_ADDR == 1) {
+        lastOutlet = v1;
+        haveOutlet = true;
+      }
     }
   }
-  // H1 busy/TO: keep haveH1; no flood (H100 log covers cycle when both busy)
+  // Temps busy/TO: keep last good; no flood (H100 log covers cycle when both busy)
 
-  if (MB_H0_POLL_ENABLED) {
+  if (MB_H0_POLL_ENABLED && MB_SP_ADDR != 0) {
     delayPumpUi(MB_FAST_INTER_MS);
     uint16_t v0 = 0;
     if (mbReadHoldingsQuiet(MB_H0_REQ, &v0, 1)) {
@@ -2531,13 +2632,13 @@ static void printLoopHelp() {
 }
 
 static void printListenReminder() {
-  Serial.println(F("Mode quiet: H100 + H1 + H101 + H7/12/13/20/23 + H500-520 ~1s."));
-  Serial.println(F("H100=/H1=/H101= + CHANGE. DIFF: H7/H12/H13/H20/H23 CHANGE."));
+  Serial.println(F("Mode quiet: H100 + OUT/IN/SP + H7/12/13/20/23 + H500-520 ~1s."));
+  Serial.println(F("OUT=/IN=/SP=/H100=/H101= + CHANGE. DIFF: H7/H12/H13/H20/H23 CHANGE."));
   Serial.println(F("H13=N (0x..) bits=B (Milan: 64 → bits=6 ≈ panel error 6)."));
   Serial.println(F("SCAN6: FC03 raw=6. SCANFC: Serial-only. DIFFAULT: Serial+auto FC16."));
   Serial.println(F("EXC6 Slave Busy → H100 busy/ex6; ≠ ERR6_ADDR / H13 bitfield."));
-  Serial.println(F("LCD Start = FC16 H100 + H13 hex/bits. Fault lit → type: scanfc"));
-  Serial.println(F("Start = FC16 only. Neni prepínac — napis: fc16   nebo  h100alt"));
+  Serial.println(F("LCD: OUT/IN/SP±0.5 + START/STOP (FC16 H100, retries)."));
+  Serial.println(F("Remap MB_OUTLET_ADDR / MB_INLET_ADDR / MB_SP_ADDR in main.cpp."));
   Serial.println(F("verbose = dump. poll = FC03 temp/error. BOOT=flash."));
 }
 
@@ -2548,12 +2649,13 @@ static void printHelp() {
   Serial.println(F("  scan6 | err6 | errdump | err — FC03 SCAN6 raw=6 (0-2047 qty16)"));
   Serial.println(F("  scanfc | fcscan — FC04 ERR6_IN= + FC01/FC02 ON bits (fault lit NOW)"));
   Serial.println(F("  diffault [base|clear] — FC03/FC04 window DIFF_ADDR=/DIFF_IN="));
-  Serial.println(F("  h100 | start100 | fc16 — quiet-bus FC16 H100=1 (START)"));
-  Serial.println(F("  stop | stop100 | fc16 0 — quiet-bus FC16 H100=0 (STOP)"));
+  Serial.println(F("  h100 | start100 | fc16 — quiet-bus FC16 H100=1 (START, retries)"));
+  Serial.println(F("  stop | stop100 | fc16 0 — quiet-bus FC16 H100=0 (STOP, retries)"));
   Serial.println(F("  fc16 1 — same as START; LCD has big START + STOP"));
+  Serial.println(F("  sp+ | sp- | sp <raw> — setpoint FC16 ±0.5 °C / absolute raw×0.1"));
   Serial.println(F("  h100alt         — FC16 first, then FC06 experiment (ACK vs EXC/TO)"));
   Serial.println(F("  fc06 [0|1]      — experiment FC06 (na teto pumpe typicky nic)"));
-  Serial.println(F("  Start/Stop = FC16 only. LCD: START=1 STOP=0. Poll H1-H5 + H13."));
+  Serial.println(F("  Start/Stop/SP = FC16. LCD: OUT/IN/SP + START/STOP. Remap in main.cpp."));
   Serial.println(F("  start | s       — START_PROBE FC06 kandidati 0-31 (auto OFF)"));
   Serial.println(F("  nopol | pollon | quiet | verbose | echo | echoon/off | tx | loop"));
   Serial.println(F("Fault lit on panel → type scanfc (Serial-only; then scan6 / diffault)."));
@@ -2651,6 +2753,28 @@ static void handleCommand(char *line) {
       return;
     }
     Serial.println(F("Usage: diffault | diffault base | diffault clear"));
+    return;
+  }
+  if (strcmp(line, "sp+") == 0 || strcmp(line, "spup") == 0) {
+    runSpStep(+1, false);
+    return;
+  }
+  if (strcmp(line, "sp-") == 0 || strcmp(line, "spdown") == 0) {
+    runSpStep(-1, false);
+    return;
+  }
+  if (strncmp(line, "sp ", 3) == 0 || strncmp(line, "sp=", 3) == 0) {
+    const char *rest = line + 3;
+    while (*rest == ' ' || *rest == '\t' || *rest == '=') rest++;
+    char *end = nullptr;
+    unsigned long v = strtoul(rest, &end, 10);
+    if (end == rest || (end && *end != '\0')) {
+      Serial.println(F("Usage: sp+ | sp- | sp <raw>  (raw×0.1 °C, e.g. sp 200)"));
+      return;
+    }
+    if (v < MB_SP_MIN_RAW) v = MB_SP_MIN_RAW;
+    if (v > MB_SP_MAX_RAW) v = MB_SP_MAX_RAW;
+    runSpWriteRaw((uint16_t)v, false);
     return;
   }
   if (strcmp(line, "h100") == 0 || strcmp(line, "start100") == 0) {
@@ -2827,15 +2951,16 @@ void setup() {
   }
 
   Serial.println();
-  Serial.println(F("=== Spawer RS485 sniffer + Modbus + LCD (H100/H13/SCAN6/DIFFAULT) ==="));
+  Serial.println(F("=== Spawer RS485 sniffer + Modbus + LCD (IN/OUT/SP + H100) ==="));
   Serial.printf("Board: Waveshare ESP32-S3-Touch-LCD-7B (USB CDC)\n");
   Serial.printf("Bus UART: RX=GPIO%d TX=GPIO%d (auto DE/RE) @ %lu 8N1\n",
                 RS485_RX_PIN, RS485_TX_PIN, (unsigned long)busBaud);
-  Serial.println(F("Cil: H100 Start + H13 bits (error 6?) + LCD FC16."));
-  Serial.println(F("Quiet: H100=/H1=/H101= + H7/12/13/20/23 CHANGE + H13 bits="));
-  Serial.println(F("SCANFC = Serial-only (type scanfc). Auto SCANFC OFF (UI block)."));
-  Serial.println(F("Also: scan6 | diffault | fc16 Start. H13=64 bits=6 ≈ panel err 6."));
-  Serial.println(F("Start = FC16 only. Neni prepínac — napis: fc16   nebo  h100alt"));
+  Serial.printf("Map candidates: OUT=H%u IN=H%u SP=H%u (raw×0.1; remap in main.cpp)\n",
+                (unsigned)MB_OUTLET_ADDR, (unsigned)MB_INLET_ADDR,
+                (unsigned)MB_SP_ADDR);
+  Serial.println(F("Quiet: OUT=/IN=/SP=/H100=/H101= + H13 bits= + SP_SET / H100_START"));
+  Serial.println(F("FC16 H100: quiet≥200ms + up to 3 tries on EXC6/TIMEOUT; in-flight lock."));
+  Serial.println(F("SCANFC = Serial-only. H13=64 bits=6 ≈ panel err 6."));
   Serial.println(F("BOOT 7B = download. TO → A<->B. REFLASH: pio run -t upload."));
   printHelp();
   Serial.println();
@@ -2854,6 +2979,7 @@ void setup() {
   mbPollEnabled = true;
   mbVerbose = false;
   mbScanBusy = false;
+  mbWriteInFlight = false;
   mbErrDumpBusy = false;
   mbLastErrDumpMs = 0;
   haveDiffBase = false;
@@ -2861,23 +2987,23 @@ void setup() {
   memset(diffHave04, 0, sizeof(diffHave04));
   haveH0 = false;
   haveH1 = false;
+  haveOutlet = false;
+  haveInlet = false;
   haveSp = false;
   haveH100 = false;
   haveH101 = false;
   haveDiffWatch = false;
   haveH13 = false;
   haveH500 = false;
+  mbWriteInFlight = false;
   lastH0 = 0;
   lastH1 = 0;
-  lastSpAddr = 0;
+  lastOutlet = 0;
+  lastInlet = 0;
   lastSpRaw = 0;
   lastH100 = 0;
   lastH101 = 0;
   lastH13 = 0;
-  for (int i = 0; i < 4; i++) {
-    lastNear[i] = 0;
-    haveNear[i] = false;
-  }
   for (size_t i = 0; i < MB_DIFFWATCH_N; i++) lastDiffWatch[i] = 0;
   for (uint16_t i = 0; i < MB_H500_QTY; i++) lastH500[i] = 0;
   havePrevScan = false;
@@ -2901,6 +3027,12 @@ void loop() {
   }
   if (uiTestConsumeStopRequest()) {
     runH100StopWrite(true);
+  }
+  if (uiTestConsumeSpDownRequest()) {
+    runSpStep(-1, true);
+  }
+  if (uiTestConsumeSpUpRequest()) {
+    runSpStep(+1, true);
   }
   pollModbusMaster();  // pumps uiTestTick inside RX waits
   uiTestTick();
@@ -2940,8 +3072,12 @@ void loop() {
     Serial.printf("[%lu ms] alive — bus@%lu poll=%s",
                   (unsigned long)millis(), (unsigned long)busBaud,
                   mbPollEnabled ? "on" : "off");
-    if (haveH1) Serial.printf(" H1=%u", (unsigned)lastH1);
-    else Serial.print(F(" H1=?"));
+    if (haveOutlet) Serial.printf(" OUT=%u", (unsigned)lastOutlet);
+    else Serial.print(F(" OUT=?"));
+    if (haveInlet) Serial.printf(" IN=%u", (unsigned)lastInlet);
+    else Serial.print(F(" IN=?"));
+    if (haveSp) Serial.printf(" SP=%u", (unsigned)lastSpRaw);
+    else Serial.print(F(" SP=?"));
     if (haveH100) Serial.printf(" H100=%u", (unsigned)lastH100);
     else Serial.print(F(" H100=?"));
     if (haveH101) Serial.printf(" H101=%u", (unsigned)lastH101);

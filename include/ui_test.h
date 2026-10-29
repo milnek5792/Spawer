@@ -1,4 +1,4 @@
-// ui_test.h — Spawer op-test LVGL UI (temps + SP? + H13 + START/STOP)
+// ui_test.h — Spawer op-test LVGL UI (IN/OUT + SP ±0.5 + H13 + START/STOP)
 #pragma once
 
 #include <stdint.h>
@@ -10,14 +10,17 @@ extern "C" {
 
 /** Snapshot for flicker-free label refresh (main → UI). */
 typedef struct UiTestSnap {
-  uint16_t h1;
-  bool haveH1;
-  /** H2..H5 raw (Fairland-like nearby temps / setpoint candidates). */
-  uint16_t nearRaw[4];
-  bool haveNear[4];
-  /** Chosen setpoint candidate (addr 2..5 typical); 0 = none. */
-  uint16_t spAddr;
+  /** Outlet water (candidate holding — default H1). */
+  uint16_t outletRaw;
+  uint16_t outletAddr;
+  bool haveOutlet;
+  /** Inlet water (candidate holding — default H2). */
+  uint16_t inletRaw;
+  uint16_t inletAddr;
+  bool haveInlet;
+  /** Setpoint (writable candidate — default H0). */
   uint16_t spRaw;
+  uint16_t spAddr;
   bool haveSp;
   uint16_t h100;
   bool haveH100;
@@ -39,22 +42,29 @@ void uiTestTick(void);
 void uiTestUpdate(const UiTestSnap *snap);
 
 /**
- * Compat helper used by older call sites / quick updates.
- * Near/SP left unchanged unless you also call uiTestSetNear.
+ * Compat helper: outlet ← h1; keeps last inlet/SP unless updated via uiTestUpdate.
  */
 void uiTestUpdateBasic(uint16_t h1, bool haveH1, uint16_t h100, bool haveH100,
                        uint16_t h101, bool haveH101, uint16_t h13, bool haveH13,
                        const char *status);
 
-/** Update H2–H5 + SP? pick (keeps last H1/H100/H101/H13). */
-void uiTestSetNear(const uint16_t nearRaw[4], const bool haveNear[4],
-                   uint16_t spAddr, uint16_t spRaw, bool haveSp);
-
-/** True once after START button press. */
+/** True once after START button press (debounced; blocked while write busy). */
 bool uiTestConsumeStartRequest(void);
 
-/** True once after STOP button press. */
+/** True once after STOP button press (debounced; blocked while write busy). */
 bool uiTestConsumeStopRequest(void);
+
+/** True once after SP − (0.5 °C) button. */
+bool uiTestConsumeSpDownRequest(void);
+
+/** True once after SP + (0.5 °C) button. */
+bool uiTestConsumeSpUpRequest(void);
+
+/**
+ * Block/allow new taps while FC16 (H100 or SP) is in flight.
+ * Also clears pending start/stop/SP flags when busy=true.
+ */
+void uiTestSetWriteBusy(bool busy);
 
 /** Optional: set status line (TX result etc.). */
 void uiTestSetStatus(const char *status);
