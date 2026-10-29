@@ -6,28 +6,29 @@ Firmware na **Waveshare ESP32-S3-Touch-LCD-7B** (UART **RX=GPIO15**, **TX=GPIO16
 
 ### Aktuální cíl: H100 Start (panel 1→0) + LCD test UI
 
-1. **Quiet Serial (default)** — jen **`H100=` / `H1=` / `H101=`** (+ **`CHANGE`**), **`H100 busy/ex6`** (rate-limited), **`H100_START`**, `alive` / `SILENT`. Žádné TEMP/ERROR / bulk dump / hex.
+1. **Quiet Serial (default)** — jen **`H100=` / `H1=` / `H101=`** (+ **`CHANGE`**), **`H100 busy/ex6`** (rate-limited), **`H100_START`**, **`SCAN6` hits** (`ERR6_ADDR=` / `Hnnn=6`), `alive` / `SILENT`. Žádné TEMP / bulk dump / hex.
 2. **FC03 fast watch** — slave **1**, **9600 8N1**, každých **~1 s** (priorita **H100**):
    - **holding 100–101** (blok qty 2) → **`H100=N`** / **`H101=N`** (při OK + LCD)
    - **Modbus EXC 0x06** (Slave Device Busy): **ne** mazat last good / UI „—“; **2–3× retry** + backoff ~200 ms; log **`H100 busy/ex6`**
-   - **≠** `ERROR_ADDR holding=… raw=6` (holding error kód — jen `verbose`)
+   - **≠** `ERR6_ADDR` / holding **raw=6** (fault kód — SCAN6)
    - settle, pak **holding 1** → **`H1=N`**; na LCD **°C = raw × 0.1**
    - **H0** volitelně **OFF**; auto temp/error scan **OFF** (nehladoví H100)
-   - **Milan:** panel **Start** → **`H100=… CHANGE`** (**1→0**)
+   - **Milan:** panel **Start** → **`H100=… CHANGE`** (**1→0**) → auto **SCAN6**
 3. **LCD test UI** (LVGL): **H1 (°C)**, **H100**, **H101** + **START** → **quiet-bus + FC16 qty1 holding 100** (toggle: **0** když H100==1, jinak **1**) + settle ≥800 ms. Serial: `h100` / `fc16` (= totéž). **FC06 na této pumpě nic nedělá.** Alts: `h100alt`.
-4. **Temp/error scan** — jen ručně `poll` (+ `verbose` pro TEMP/ERROR / hex). **FC04/01/02 OFF.**
-5. **START_PROBE** — auto OFF; jen `start` / `s`.
+4. **SCAN6** — FC03 bloky **qty 16** přes **0–2047**; výpis **jen** adres s raw **6** (`ERR6_ADDR=nnn` + `Hnnn=6`). TO bloky přeskočí; stop po 8× TO v řadě. Auto po FC16 Start / H100 1→0; ručně **`scan6`** / **`err6`** (opakovatelné).
+5. **Temp/error scan** — jen ručně `poll` (+ `verbose` pro TEMP/ERROR / hex). **FC04/01/02 OFF.**
+6. **START_PROBE** — auto OFF; jen `start` / `s`.
 
-Hledej: **`H100=` / `CHANGE`**, **`H100_START tap`**, **`H100_START` TX/RX hex**, **`H1=`**, **`H101=`**, případně **`H100 busy/ex6`**. (`verbose` → TEMP/ERROR.)
+Hledej: **`H100=` / `CHANGE`**, **`H100_START` TX/RX**, **`SCAN6` / `ERR6_ADDR=`**, **`H1=`**, **`H101=`**, případně **`H100 busy/ex6`**.
 
-> **Milan — REFLASH** (Start = **FC16 only**; FC06 nic nedělá):
+> **Milan — REFLASH** (Start = **FC16 only**; SCAN6 raw=6):
 > ```bash
 > cd …/docs/spawer-rs485/spawer_rs485_sniffer
 > pio run -t upload
 > pio device monitor -e waveshare_esp32s3_lcd7b
 > ```
 > Po uploadu zavři/znovu otevři monitor (Windows CDC). Serial = `H100=` / `H1=` / `H101=` ~1 s; při busy jen občas `H100 busy/ex6` (UI drží last).  
-> **Neni prepínac** — napiš: `fc16` nebo `h100alt`. **Panel Start** → `H100=… CHANGE` (1→0). **LCD START** / `h100` / `fc16` → quiet-bus **FC16** qty1 + TX/RX (`ACK` / `EXC6` / `TIMEOUT`).
+> **Neni prepínac** — napiš: `fc16` nebo `h100alt`. **Panel Start** → `H100=… CHANGE` (1→0) + **SCAN6**. **LCD START** / `h100` / `fc16` → quiet-bus **FC16** + **SCAN6**. Ručně: `scan6`.
 
 ### Live FC03 hodnoty (Milan) — jen raw
 
@@ -109,19 +110,19 @@ GND (volitelně) ───  společná zem
 2. Dip **RS485 termination** na Waveshare: **OFF / NC**.
 3. **Reflash** + otevři monitor @ 115200 (`pio device monitor`).
 4. LCD ukáže **H1 °C**, **H100**, **H101**; Serial quiet = `H100=` / `H1=` / `H101=` ~1 s + light **`H500–520`** (CHANGE/nonzero).
-5. **Panel Start** — hledej **`H100=… CHANGE`** (**1→0**) a hned **`=== ERR_DUMP (H100 1->0) ===`** → **`Hnnn=`** / **`ERR_ADDR=nnn raw=…`** (jen nonzero; 500–506 nestačilo).
+5. **Panel Start** — hledej **`H100=… CHANGE`** (**1→0**) a hned **`=== SCAN6 (H100 1->0) ===`** → jen **`ERR6_ADDR=nnn`** / **`Hnnn=6`** (holding raw=6).
 6. **LCD START** (nebo Serial `h100` / `fc16`) — **FC16 only**:
    - `H100_START tap (UI CLICKED)` — touch dorazil
    - `=== H100_START (UI) ===` + `quiet-bus` + **`H100_START TX … FC16 …`** hex + **`H100_START RX …`** / `TIMEOUT`
    - `H100_START result=ACK|EXC6|TIMEOUT|… (FC16 qty1)`
-   - Po confirm: **`=== ERR_DUMP (post-FC16 Start) ===`** (kandidáti + sparse) → `Hnnn=` / `ERR_ADDR=`
+   - Po confirm: **`=== SCAN6 (post-FC16 Start) ===`** → `ERR6_ADDR=` / `Hnnn=6`
    - Bez **tap** řádku = touch path; tap + TX ale silence/EXC = Modbus / busy bus
-7. Ručně **`errdump`** — stejný one-shot lov (když panel Start bez FC16).
-8. Občas **`H100 busy/ex6`** = Modbus Slave Busy — UI **ne** „—“; ≠ `ERR_ADDR` holding raw.
-9. **ERR_DUMP okna:** 0–31, 100–120, 200–220, 400–420, 500–520, 1000–1020, 2000–2020 + sparse 50/150/250/300/350/600/700/800/900/1500/2500/3000.
-10. Pošli řádky `H100=` / `ERR_DUMP` / `Hnnn=` / `ERR_ADDR=` / `CHANGE` / `H100_START` TX|RX / `result=`.
+7. Ručně **`scan6`** / **`err6`** — stejný plný sweep (opakovatelný; alias `errdump`).
+8. Občas **`H100 busy/ex6`** = Modbus Slave Busy — UI **ne** „—“; ≠ `ERR6_ADDR` holding raw=6.
+9. **SCAN6:** FC03 qty **16** přes **0–2047**; TO bloky skip; stop po **8×** consecutive TO (ne endless).
+10. Pošli řádky `H100=` / `SCAN6` / `ERR6_ADDR=` / `Hnnn=6` / `CHANGE` / `H100_START` TX|RX / `result=`.
 
-**Očekávání:** H100 Start dál funguje; po Start/`1→0` uvidíš **ERR_DUMP** (nejen 500–506); FC06 nic nedělá.
+**Očekávání:** H100 Start dál funguje; po Start/`1→0` / `scan6` uvidíš **jen adresy s raw=6**; FC06 nic nedělá.
 
 **Tip při samých TIMEOUT:** prohoď **A↔B**, ověř napájení Spaweru, pak baud `4800` / `19200`.
 
@@ -149,15 +150,16 @@ USB 115200, příkaz + Enter (**volitelné**):
 | Příkaz | Akce |
 |--------|------|
 | *(auto fast)* | FC03 H1 + 100–101 + **500–520** ~1 s → `H1=` / `H100=` [/ `CHANGE`]; H5xx jen CHANGE/nonzero |
-| *(LCD Start / panel 1→0)* | po FC16 confirm nebo H100 **1→0** → **`ERR_DUMP`** (`Hnnn=` / `ERR_ADDR=`) |
-| `h100` / `start100` / `fc16` | totéž jako LCD Start (**FC16 only**; bez tap řádku) + ERR_DUMP |
+| *(LCD Start / panel 1→0)* | po FC16 confirm nebo H100 **1→0** → **`SCAN6`** (`ERR6_ADDR=` / `Hnnn=6`) |
+| `h100` / `start100` / `fc16` | totéž jako LCD Start (**FC16 only**; bez tap řádku) + SCAN6 |
 | `fc16 0` / `fc16 1` | FC16 qty1 s explicitní hodnotou |
-| `errdump` / `err` | ruční one-shot ERR_DUMP (kandidáti + sparse) |
+| `scan6` / `err6` | ruční FC03 SCAN6 raw=6 (0–2047 qty16; opakovatelné) |
+| `errdump` / `err` | alias **`scan6`** |
 | `h100alt` | FC16 first, pak FC06 experiment — log `ACK` / `EXC6` / `TIMEOUT` |
 | `fc06` | experiment FC06 (na této pumpě typicky **nic**) |
 | *(auto scan)* | OFF — ručně `poll` → `TEMP_ADDR` / `ERROR_ADDR` |
 | `poll` / `p` | jeden FC03 temp/error scan hned |
-| `quiet` / `q` | jen `H1/H100/H101` + busy/ex6 + H100_START (default) |
+| `quiet` / `q` | jen `H1/H100/H101` + busy/ex6 + H100_START + SCAN6 triggers (default) |
 | `verbose` / `v` | dump bloků hex + TEMP / ERROR + pasivní frames |
 | `start` / `s` | START_PROBE FC06 kandidáti 0–31 (**auto OFF**) |
 | `pollon` / `nopol` | zapni / vypni fast + scan |
@@ -183,7 +185,9 @@ USB 115200, příkaz + Enter (**volitelné**):
 | `MODBUS_TIMEOUT` | žádná odpověď — **A↔B**, napájení, baud, slave≠1 / mimo mapu |
 | `TEMP_ADDR holding=N raw=V` | temp hit — `N` = abs holding, raw **150..350** |
 | `TEMP_ADDR none` | v pásmu 150–350 nic (nebo samé TO) |
-| `ERROR_ADDR holding=N raw=6` | holding **10..20** má raw **6** (kandidát error kódu) |
+| `ERR6_ADDR=N` / `HN=6` | SCAN6 hit — holding **N** má raw **6** (fault latch) |
+| `SCAN6 …` | plný FC03 sweep 0–2047 qty16; auto po Start / ručně `scan6` |
+| `ERROR_ADDR holding=N raw=6` | jen **verbose** / starý 10–20 scan |
 | `MODBUS_EXC` | výjimka od slave — bus/Modbus žije, mapování jiné |
 | `MODBUS_CRC_ERR` | bajty přišly, CRC nesedí — šum / polarita / baud |
 | `START_PROBE TX/RX` | jen po `start` — FC06 kandidáti 0–31 |

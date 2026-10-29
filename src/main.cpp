@@ -22,15 +22,15 @@
  *         settle, pak FC03 holding 1 → H1=
  *         settle, FC03 holding 500–520 (quiet CHANGE/nonzero) — H500–506 nestačilo
  *         H0 volitelně OFF (MB_H0_POLL_ENABLED)
- *       ERROR dump (quiet, jen nonzero / CHANGE / ERR_ADDR):
- *         kandidáti 0–31, 100–120, 200–220, 400–420, 500–520, 1000–1020, 2000–2020
- *         + sparse 50/150/250/300/350/600/700/800/900/1500/2500/3000 (qty 8)
- *         trigger: po FC16 Start, při H100 1→0, Serial `errdump`
+ *       SCAN6 (quiet, jen holding raw=6):
+ *         FC03 bloky qty 16 přes 0–2047; TO bloky přeskočit; stop po N× TO v řadě
+ *         výpis jen ERR6_ADDR=nnn + Hnnn=6 (jednou na hit)
+ *         trigger: po FC16 Start, při H100 1→0, Serial `scan6` / `err6`
  *       lehký temp/error scan DEFAULT OFF (ručně `poll`; nehladoví H100)
  *       FC04 / FC01 / FC02 SKIP
  *   - START_PROBE FC06: auto OFF; ručně `start` (holding 0–31 kandidáti)
  *   - UI Start / h100 / fc16: pause poll → quiet bus ≥80 ms → FC16 qty1 → echo → settle
- *   - Po FC16: dual confirm H100/H101/H1 + jednou ERR dump (fault latch)
+ *   - Po FC16: dual confirm H100/H101/H1 + jednou SCAN6 (fault latch raw=6)
  *   - FC06 na této Spawer pumpě nic nedělá — primary Start = FC16 only
  *   - h100alt: experimentální sekvence (FC16 first; FC06 jen pro srovnání)
  *   - fc16 0|1 / h100fc16: explicitní hodnota; bez arg = toggle jako Start
@@ -39,8 +39,9 @@
  *   - BOOT 7B = download; GPIO0 = LCD G3; auto echo OFF
  *
  * Baud / HW test (Serial 115200):
- *   help | listen | b | baud | poll | nopol | start | h100 | fc16 | h100alt | fc06 | errdump
- *   verbose | quiet | echoon | echooff | 4800 | 9600 | … | echo | e | ping | tx | loop
+ *   help | listen | b | baud | poll | nopol | start | h100 | fc16 | h100alt | fc06
+ *   scan6 | err6 | errdump | verbose | quiet | echoon | echooff | 4800 | 9600 | …
+ *   echo | e | ping | tx | loop
  */
 
 #include <Arduino.h>
@@ -103,40 +104,18 @@ static const uint16_t ERROR_RAW_MATCH = 6;
 // Quiet continuous: expand 500–506 → 500–520 (Milan: 500–506 empty)
 static const uint16_t MB_H500_ADDR = 500;
 static const uint16_t MB_H500_QTY = 21;  // 500..520 inclusive
-static const uint16_t MB_ERR_DUMP_MAX_QTY = 32;
-static const uint32_t MB_ERR_DUMP_COOLDOWN_MS = 5000;  // panel 1→0 auto dump
-static const uint32_t MB_ERR_WIN_GAP_MS = 80;          // mezera mezi ERR okny (latch)
+// SCAN6 — full FC03 sweep for holding raw==6 (blocks of 16; skip endless TO)
+static const uint16_t MB_SCAN6_BLOCK = 16;
+static const uint16_t MB_SCAN6_START = 0;
+static const uint16_t MB_SCAN6_END = 2048;           // exclusive (0..2047)
+static const uint8_t MB_SCAN6_TO_STOP = 8;           // consecutive TO blocks → stop
+static const uint8_t MB_SCAN6_BUSY_TRIES = 2;        // ExcBusy only (TO = no retry)
+static const uint32_t MB_SCAN6_GAP_MS = 40;          // mezera mezi bloky
+static const uint32_t MB_SCAN6_COOLDOWN_MS = 1500;   // auto anti-double (Serial force)
 static const uint16_t CANDIDATE_TEMP_MIN = 150;
 static const uint16_t CANDIDATE_TEMP_MAX = 350;
 static const size_t MAX_TEMP_CANDS = 64;
 static const size_t MAX_ERROR_CANDS = 16;
-
-struct ErrWin {
-  uint16_t start;
-  uint16_t qty;
-  const char *label;
-};
-
-// Candidate error windows (H500–506 empty → hunt elsewhere). 10–20 ⊂ 0–31.
-static const ErrWin MB_ERR_WINS[] = {
-    {0, 32, "0-31"},
-    {100, 21, "100-120"},
-    {200, 21, "200-220"},
-    {400, 21, "400-420"},
-    {500, 21, "500-520"},
-    {1000, 21, "1000-1020"},
-    {2000, 21, "2000-2020"},
-};
-static const size_t MB_ERR_WINS_N = sizeof(MB_ERR_WINS) / sizeof(MB_ERR_WINS[0]);
-
-// One-shot wider sparse (short blocks — mimo husté kandidáty)
-static const ErrWin MB_ERR_SPARSE[] = {
-    {50, 8, "50-57"},     {150, 8, "150-157"}, {250, 8, "250-257"},
-    {300, 8, "300-307"},  {350, 8, "350-357"}, {600, 8, "600-607"},
-    {700, 8, "700-707"},  {800, 8, "800-807"}, {900, 8, "900-907"},
-    {1500, 8, "1500-1507"}, {2500, 8, "2500-2507"}, {3000, 8, "3000-3007"},
-};
-static const size_t MB_ERR_SPARSE_N = sizeof(MB_ERR_SPARSE) / sizeof(MB_ERR_SPARSE[0]);
 
 static const uint8_t ECHO_PATTERN[] = {
     0xE5, 0x53, 0x50, 0x41, 0x57, 0x45, 0x52, 0x0A};
@@ -1084,62 +1063,31 @@ static void pollH500ErrorBlock(bool forcePrint) {
   }
 }
 
-// Read one ERR window; print only nonzero (or CHANGE vs lastH500 for 500–520).
-// Returns nonzero count (0 on TO/fail).
-static size_t dumpOneErrWindow(const ErrWin &w, bool annotateSparse) {
-  if (w.qty == 0 || w.qty > MB_ERR_DUMP_MAX_QTY) return 0;
-  MbReadReq req = {0x03, w.start, w.qty, w.label};
-  uint16_t vals[MB_ERR_DUMP_MAX_QTY];
-  memset(vals, 0, sizeof(vals));
+// SCAN6 read: retry ExcBusy only — Timeout/CRC/ExcOther → skip block (no flood).
+static MbQuietStatus mbReadHoldingsQuietScan(const MbReadReq &r, uint16_t *vals,
+                                             size_t valsCap, uint8_t *excOut) {
+  MbQuietStatus st = MbQuietStatus::Timeout;
   uint8_t exc = 0;
-  MbQuietStatus st = mbReadHoldingsQuietRetry(req, vals, w.qty, &exc);
-  if (st != MbQuietStatus::Ok) {
-    if (mbVerbose) {
-      Serial.printf("  ERR_WIN %s fail st=%u\n", w.label, (unsigned)st);
+  for (uint8_t attempt = 0; attempt < MB_SCAN6_BUSY_TRIES; attempt++) {
+    if (attempt > 0) {
+      delayPumpUi(MB_BUSY_BACKOFF_MS);
     }
-    return 0;
+    st = mbReadHoldingsQuietStatus(r, vals, valsCap, &exc);
+    if (excOut) *excOut = exc;
+    if (st == MbQuietStatus::Ok) return st;
+    if (st != MbQuietStatus::ExcBusy) return st;
   }
-
-  size_t nz = 0;
-  for (uint16_t i = 0; i < w.qty; i++) {
-    uint16_t addr = (uint16_t)(w.start + i);
-    uint16_t v = vals[i];
-    if (v == 0) {
-      // Keep 500–520 last cache in sync when this window overlaps
-      if (addr >= MB_H500_ADDR && addr < (uint16_t)(MB_H500_ADDR + MB_H500_QTY)) {
-        uint16_t idx = (uint16_t)(addr - MB_H500_ADDR);
-        lastH500[idx] = 0;
-        haveH500 = true;
-      }
-      continue;
-    }
-    nz++;
-    bool ch = false;
-    if (addr >= MB_H500_ADDR && addr < (uint16_t)(MB_H500_ADDR + MB_H500_QTY)) {
-      uint16_t idx = (uint16_t)(addr - MB_H500_ADDR);
-      ch = haveH500 && lastH500[idx] != v;
-      lastH500[idx] = v;
-      haveH500 = true;
-    }
-    emitErrHoldingQuiet(addr, v, ch, false);
-    if (annotateSparse) {
-      Serial.printf("ERR_SPARSE win=%s H%u=%u\n", w.label, (unsigned)addr,
-                    (unsigned)v);
-    }
-  }
-  return nz;
+  return st;
 }
 
-// One-shot candidate + sparse dump. Quiet: only nonzero / CHANGE / ERR_ADDR=.
-// forceIgnoreCooldown: always after FC16 Start; false = H100 1→0 (cooldown).
-static void dumpErrorCandidateWindows(const char *why, bool forceIgnoreCooldown) {
+// Full FC03 sweep 0–2047 (qty 16): print ONLY addresses with raw==6.
+// forceIgnoreCooldown: Serial scan6 / post-FC16; false = H100 1→0 (short cooldown).
+static void scanHoldingsForRaw6(const char *why, bool forceIgnoreCooldown) {
   if (mbErrDumpBusy) return;
   uint32_t now = millis();
   if (!forceIgnoreCooldown && mbLastErrDumpMs != 0 &&
-      (now - mbLastErrDumpMs) < MB_ERR_DUMP_COOLDOWN_MS) {
-    Serial.printf("ERR_DUMP skip (cooldown %lu ms) why=%s\n",
-                  (unsigned long)MB_ERR_DUMP_COOLDOWN_MS,
-                  why ? why : "?");
+      (now - mbLastErrDumpMs) < MB_SCAN6_COOLDOWN_MS) {
+    // Quiet skip (anti-double with post-FC16) — no Serial spam
     return;
   }
   mbErrDumpBusy = true;
@@ -1148,29 +1096,70 @@ static void dumpErrorCandidateWindows(const char *why, bool forceIgnoreCooldown)
   mbScanBusy = true;
 
   Serial.println();
-  Serial.printf("=== ERR_DUMP (%s) — quiet nonzero / ERR_ADDR= ===\n",
-                why ? why : "?");
-  Serial.println(
-      F("wins: 0-31 100-120 200-220 400-420 500-520 1000-1020 2000-2020 + sparse"));
+  Serial.printf("=== SCAN6 (%s) FC03 raw=6 blocks=%u range=%u-%u ===\n",
+                why ? why : "?", (unsigned)MB_SCAN6_BLOCK,
+                (unsigned)MB_SCAN6_START, (unsigned)(MB_SCAN6_END - 1));
 
-  size_t totalNz = 0;
-  for (size_t i = 0; i < MB_ERR_WINS_N; i++) {
-    Serial.printf("ERR_WIN %s…\n", MB_ERR_WINS[i].label);
-    totalNz += dumpOneErrWindow(MB_ERR_WINS[i], false);
-    delayPumpUi(MB_ERR_WIN_GAP_MS);
-  }
-  Serial.println(F("ERR_SPARSE…"));
-  for (size_t i = 0; i < MB_ERR_SPARSE_N; i++) {
-    totalNz += dumpOneErrWindow(MB_ERR_SPARSE[i], true);
-    delayPumpUi(MB_ERR_WIN_GAP_MS);
+  uint16_t vals[MB_SCAN6_BLOCK];
+  size_t hits = 0;
+  uint16_t okBlocks = 0;
+  uint16_t toBlocks = 0;
+  uint16_t skipBlocks = 0;
+  uint8_t consecTo = 0;
+  uint16_t lastOkEnd = 0;
+  char label[28];
+
+  for (uint16_t start = MB_SCAN6_START; start < MB_SCAN6_END;
+       start = (uint16_t)(start + MB_SCAN6_BLOCK)) {
+    uint16_t qty = MB_SCAN6_BLOCK;
+    if ((uint32_t)start + qty > MB_SCAN6_END) {
+      qty = (uint16_t)(MB_SCAN6_END - start);
+    }
+    if (qty == 0) break;
+
+    snprintf(label, sizeof(label), "SCAN6 %u", (unsigned)start);
+    MbReadReq req = {0x03, start, qty, label};
+    memset(vals, 0, sizeof(vals));
+    uint8_t exc = 0;
+    MbQuietStatus st = mbReadHoldingsQuietScan(req, vals, qty, &exc);
+
+    if (st == MbQuietStatus::Ok) {
+      consecTo = 0;
+      okBlocks++;
+      lastOkEnd = (uint16_t)(start + qty);
+      for (uint16_t i = 0; i < qty; i++) {
+        if (vals[i] != ERROR_RAW_MATCH) continue;
+        uint16_t addr = (uint16_t)(start + i);
+        // Once per hit — only addresses containing raw 6
+        Serial.printf("ERR6_ADDR=%u\n", (unsigned)addr);
+        Serial.printf("H%u=6\n", (unsigned)addr);
+        hits++;
+      }
+    } else if (st == MbQuietStatus::Timeout) {
+      toBlocks++;
+      consecTo++;
+      if (consecTo >= MB_SCAN6_TO_STOP) {
+        Serial.printf("SCAN6 stop TO @%u (consec=%u) — skip rest\n",
+                      (unsigned)start, (unsigned)consecTo);
+        break;
+      }
+    } else {
+      // ExcOther / CRC / Frame — slave may still be alive; skip block
+      skipBlocks++;
+      consecTo = 0;
+    }
+    delayPumpUi(MB_SCAN6_GAP_MS);
   }
 
-  if (totalNz == 0) {
-    Serial.println(F("ERR_DUMP empty — no nonzero in candidate/sparse windows"));
+  if (hits == 0) {
+    Serial.printf("SCAN6 empty — no raw=6 (ok=%u to=%u skip=%u)\n",
+                  (unsigned)okBlocks, (unsigned)toBlocks, (unsigned)skipBlocks);
   } else {
-    Serial.printf("ERR_DUMP done nonzero_hits=%u\n", (unsigned)totalNz);
+    Serial.printf("SCAN6 done hits=%u ok=%u to=%u skip=%u last_ok_end=%u\n",
+                  (unsigned)hits, (unsigned)okBlocks, (unsigned)toBlocks,
+                  (unsigned)skipBlocks, (unsigned)lastOkEnd);
   }
-  Serial.println(F("=== ERR_DUMP end ==="));
+  Serial.println(F("=== SCAN6 end ==="));
 
   mbScanBusy = prevBusy;
   mbErrDumpBusy = false;
@@ -1489,12 +1478,12 @@ static void h100WriteEndWindow(uint16_t expectWrite) {
   delayPumpUi(MB_H100_CONFIRM_LATE_MS);
   h100ConfirmSample(expectWrite, "2/2");
 
-  // Fault latch often clears with H100 1→0 — dump candidate windows once now.
-  dumpErrorCandidateWindows("post-FC16 Start", true);
+  // Fault latch often clears with H100 1→0 — full SCAN6 for raw=6 once now.
+  scanHoldingsForRaw6("post-FC16 Start", true);
 
   mbScanBusy = false;
   mbNextFastMs = millis() + MB_H100_POLL_RESUME_MS;
-  Serial.println(F("  poll RESUMED (post-write confirm + ERR_DUMP)"));
+  Serial.println(F("  poll RESUMED (post-write confirm + SCAN6)"));
   lastActivityMs = millis();
   silentAnnounced = false;
 }
@@ -1840,7 +1829,7 @@ static void pollFastHoldings() {
   MbQuietStatus st100 =
       mbReadHoldingsQuietRetry(MB_H100_BLOCK, v100, 2, &exc100);
   if (st100 == MbQuietStatus::Ok) {
-    // Panel Start fault: H100 1→0 — catch error latch with one ERR_DUMP
+    // Panel Start fault: H100 1→0 — catch error latch with SCAN6 (raw=6)
     if (haveH100 && lastH100 == MB_H100_START_VALUE && v100[0] == 0) {
       h100Cleared10 = true;
     }
@@ -1878,9 +1867,9 @@ static void pollFastHoldings() {
   delayPumpUi(MB_FAST_INTER_MS);
   pollH500ErrorBlock(false);
 
-  // Panel Start → H100 1→0: dump candidate error windows once (cooldown)
+  // Panel Start → H100 1→0: SCAN6 raw=6 (short cooldown vs post-FC16)
   if (h100Cleared10) {
-    dumpErrorCandidateWindows("H100 1->0", false);
+    scanHoldingsForRaw6("H100 1->0", false);
   }
 
   // UI: labels only redraw when values change (no per-poll flicker)
@@ -1922,9 +1911,9 @@ static void printLoopHelp() {
 static void printListenReminder() {
   Serial.println(F("Mode quiet: H100 + H1 + H101 + H500-520 ~1s (temp auto scan OFF)."));
   Serial.println(F("H100=/H1=/H101= + CHANGE (Milan: panel Start → H100 1→0). H0 OFF."));
-  Serial.println(F("ERR_DUMP: po FC16 / H100 1→0 / errdump — Hnnn= + ERR_ADDR= (jen nonzero)."));
-  Serial.println(F("Wins: 0-31 100-120 200-220 400-420 500-520 1000-1020 2000-2020 + sparse."));
-  Serial.println(F("EXC6 Slave Busy → H100 busy/ex6 (keep last); ≠ ERR_ADDR raw=6."));
+  Serial.println(F("SCAN6: po FC16 / H100 1→0 / scan6|err6 — jen ERR6_ADDR= + Hnnn=6."));
+  Serial.println(F("SCAN6 = FC03 qty16 across 0-2047; skip TO blocks; stop after 8x TO."));
+  Serial.println(F("EXC6 Slave Busy → H100 busy/ex6 (keep last); ≠ ERR6_ADDR holding raw=6."));
   Serial.println(F("LCD: H1×0.1°C + H100/H101 + Start → quiet-bus FC16 qty1 H100 (toggle)."));
   Serial.println(F("Start = FC16 only (FC06 na teto pumpe nic nedela)."));
   Serial.println(F("Neni prepínac — napis: fc16   nebo  h100alt"));
@@ -1937,7 +1926,7 @@ static void printHelp() {
   Serial.println(F("Prikazy (USB 115200) — pokud PuTTY vstup funguje:"));
   Serial.println(F("  help | listen | b | baud | 4800 | 9600 | 19200 | 38400 | 57600 | 115200"));
   Serial.println(F("  poll | p        — jeden FC03 temp/error scan ted (verbose doporuceno)"));
-  Serial.println(F("  errdump | err   — jednou ERR_DUMP kandidatnich oken (Hnnn=/ERR_ADDR=)"));
+  Serial.println(F("  scan6 | err6 | errdump | err — FC03 SCAN6 raw=6 (0-2047 qty16)"));
   Serial.println(F("  h100 | start100 | fc16 | h100fc16 — quiet-bus FC16 qty1 H100 toggle"));
   Serial.println(F("  fc16 0 | fc16 1 — same FC16 path, explicit value"));
   Serial.println(F("  h100alt         — FC16 first, then FC06 experiment (ACK vs EXC/TO)"));
@@ -1947,15 +1936,16 @@ static void printHelp() {
   Serial.println(F("  start | s       — START_PROBE FC06 kandidati 0-31 (auto OFF)"));
   Serial.println(F("  nopol           — vypni periodicky poll (fast)"));
   Serial.println(F("  pollon          — zapni fast H100/H1/H101/H500-520 ~1s"));
-  Serial.println(F("  quiet           — H1/H100/H101 + H500-520 + ERR_DUMP triggers (default)"));
+  Serial.println(F("  quiet           — H1/H100/H101 + H500-520 + SCAN6 triggers (default)"));
   Serial.println(F("  verbose | v     — dump hex + TEMP_ADDR / ERROR_ADDR + pasivni frames"));
   Serial.println(F("  echo | e | ping — TX test (NE na zivem Spawer, pokud nemusis)"));
   Serial.println(F("  echoon/echooff  — auto echo 3x po startu (default OFF ve Spawer)"));
   Serial.println(F("  tx | loop"));
-  Serial.println(F("Fast ~1s: FC03 100-101, H1, 500-520 → H100=/H1=/H5xx=/ERR_ADDR=."));
-  Serial.println(F("ERR_DUMP auto: po FC16 Start + pri H100 1→0 (cooldown 5s)."));
+  Serial.println(F("Fast ~1s: FC03 100-101, H1, 500-520 → H100=/H1=/H5xx=."));
+  Serial.println(F("SCAN6 auto: po FC16 Start + pri H100 1→0; ručne scan6/err6 (opakovatelne)."));
+  Serial.println(F("SCAN6 vystup: jen ERR6_ADDR=nnn + Hnnn=6. Jinak quiet."));
   Serial.println(F("LCD Start = H100_START tap + quiet-bus FC16 qty1 + TX/RX + confirm."));
-  Serial.println(F("Auto TEMP scan OFF (nehladovi H100). Ručne: poll / verbose / errdump."));
+  Serial.println(F("Auto TEMP scan OFF (nehladovi H100). Ručne: poll / verbose / scan6."));
   Serial.println(F("AUTO START_PROBE OFF. BOOT 7B = download. GPIO0 = LCD G3."));
   Serial.println(F("Pri SILENT/TIMEOUT: prohod A<->B, zkus jiny baud."));
 }
@@ -2016,9 +2006,12 @@ static void handleCommand(char *line) {
     runModbusPollCycle();
     return;
   }
-  if (strcmp(line, "errdump") == 0 || strcmp(line, "err") == 0 ||
+  if (strcmp(line, "scan6") == 0 || strcmp(line, "err6") == 0 ||
+      strcmp(line, "errdump") == 0 || strcmp(line, "err") == 0 ||
       strcmp(line, "errors") == 0) {
-    dumpErrorCandidateWindows("Serial errdump", true);
+    // Force re-entry if a previous sweep aborted mid-way (busy stuck)
+    mbErrDumpBusy = false;
+    scanHoldingsForRaw6("Serial scan6", true);
     return;
   }
   if (strcmp(line, "h100") == 0 || strcmp(line, "start100") == 0) {
@@ -2190,21 +2183,21 @@ void setup() {
   }
 
   Serial.println();
-  Serial.println(F("=== Spawer RS485 sniffer + Modbus + LCD test UI (H1/H100/H101/ERR) ==="));
+  Serial.println(F("=== Spawer RS485 sniffer + Modbus + LCD test UI (H1/H100/H101/SCAN6) ==="));
   Serial.printf("Board: Waveshare ESP32-S3-Touch-LCD-7B (USB CDC)\n");
   Serial.printf("Bus UART: RX=GPIO%d TX=GPIO%d (auto DE/RE) @ %lu 8N1\n",
                 RS485_RX_PIN, RS485_TX_PIN, (unsigned long)busBaud);
-  Serial.println(F("Cil: H100 Start + ERR hunt (mimo 500-506) + LCD Start FC16."));
-  Serial.println(F("Quiet Serial: H100= H1= H101= Hnnn= ERR_ADDR= + busy/ex6 / H100_START."));
+  Serial.println(F("Cil: H100 Start + SCAN6 raw=6 (0-2047) + LCD Start FC16."));
+  Serial.println(F("Quiet Serial: H100= H1= H101= + busy/ex6 / H100_START / SCAN6 hits."));
   Serial.println(F("Fast ~1s: FC03 100-101, H1, 500-520. H0 OFF."));
-  Serial.println(F("  ERR_DUMP po FC16 / H100 1→0 / errdump (kandidati + sparse)."));
+  Serial.println(F("  SCAN6 po FC16 / H100 1→0 / scan6|err6 — jen ERR6_ADDR= + Hnnn=6."));
   Serial.println(F("  Milan: panel Start → H100 CHANGE 1→0. LCD/h100/fc16 → FC16 + confirm."));
   Serial.println(F("Start = FC16 only (FC06 na teto pumpe nic nedela)."));
   Serial.println(F("Neni prepínac — napis: fc16   nebo  h100alt"));
-  Serial.println(F("Auto TEMP scan OFF (nehladovi H100). Ručne: poll + verbose + errdump."));
+  Serial.println(F("Auto TEMP scan OFF (nehladovi H100). Ručne: poll + verbose + scan6."));
   Serial.println(F("  FC04/FC01/FC02 OFF. START_PROBE auto OFF (jen 'start')."));
   Serial.println(F("  BOOT 7B = download/USB-reset (GPIO0=LCD G3). Serial zustava."));
-  Serial.println(F("Sleduj: H100= ERR_ADDR= Hnnn= / CHANGE / H100_START TX|RX. TO → A<->B."));
+  Serial.println(F("Sleduj: H100= ERR6_ADDR= / CHANGE / H100_START TX|RX. TO → A<->B."));
   Serial.println(F("REFLASH: pio run -t upload; pak pio device monitor. Auto echo OFF."));
   printHelp();
   Serial.println();
