@@ -1,4 +1,4 @@
-// ui_test.cpp — Spawer op-test: D0–D3 + SP H101 ±0.5 + H100/H13 + START/STOP
+// ui_test.cpp — Spawer op-test: D0–D9 grid + SP H101 ±0.5 + H100/H13 + START/STOP
 #include "ui_test.h"
 
 #include "board_7b.h"
@@ -34,12 +34,26 @@ bool s_touchArmed = false;
 int16_t s_touchLastX = 0;
 int16_t s_touchLastY = 0;
 
+// Manual D0–D9 short ASCII names (Montserrat has no Czech diacritics).
+static const char *const kDNames[UI_D_COUNT] = {
+    "Okolni",      // D0
+    "Vstup",       // D1
+    "Vystup",      // D2
+    "Civka",       // D3
+    "Kompresor",   // D4
+    "Ventilator",  // D5
+    "4cestny",     // D6
+    "HiTlak",      // D7
+    "LoTlak",      // D8
+    "Prutok",      // D9
+};
+
+// D0–D3 = temps (°C ×0.1); D4–D9 = discrete / status (ZAP/VYP when 0/1).
+static bool isTempD(int i) { return i >= 0 && i <= 3; }
+
 lv_obj_t *s_lblTitle = nullptr;
-lv_obj_t *s_lblOut = nullptr;   // D2 Výstup
-lv_obj_t *s_lblIn = nullptr;    // D1 Vstup
-lv_obj_t *s_lblAmb = nullptr;   // D0 Okolní
-lv_obj_t *s_lblCoil = nullptr;  // D3 Cívka
-lv_obj_t *s_lblSp = nullptr;    // SP H101
+lv_obj_t *s_lblD[UI_D_COUNT] = {};
+lv_obj_t *s_lblSp = nullptr;
 lv_obj_t *s_lblH100 = nullptr;
 lv_obj_t *s_lblH13 = nullptr;
 lv_obj_t *s_lblStatus = nullptr;
@@ -59,10 +73,7 @@ static const uint32_t TAP_DEBOUNCE_MS = 450;
 
 UiTestSnap s_last = {};
 
-char s_txtOut[64] = "";
-char s_txtIn[64] = "";
-char s_txtAmb[64] = "";
-char s_txtCoil[64] = "";
+char s_txtD[UI_D_COUNT][48] = {};
 char s_txtSp[64] = "";
 char s_txtH100[32] = "";
 char s_txtH13[72] = "";
@@ -201,24 +212,57 @@ void fmtTempC(char *buf, size_t cap, uint16_t raw) {
   snprintf(buf, cap, "%d.%d", whole, frac);
 }
 
+void fmtDValue(char *buf, size_t cap, int idx, uint16_t raw, bool have) {
+  if (!have) {
+    if (isTempD(idx)) {
+      snprintf(buf, cap, "D%d %-10s  —.- C", idx, kDNames[idx]);
+    } else {
+      snprintf(buf, cap, "D%d %-10s  —", idx, kDNames[idx]);
+    }
+    return;
+  }
+  if (isTempD(idx)) {
+    char t[16];
+    fmtTempC(t, sizeof(t), raw);
+    snprintf(buf, cap, "D%d %-10s  %s C", idx, kDNames[idx], t);
+  } else if (raw <= 1) {
+    snprintf(buf, cap, "D%d %-10s  %s", idx, kDNames[idx], raw ? "ZAP" : "VYP");
+  } else {
+    snprintf(buf, cap, "D%d %-10s  %u", idx, kDNames[idx], (unsigned)raw);
+  }
+}
+
 lv_obj_t *makeSpButton(lv_obj_t *scr, const char *txt, lv_align_t align, int32_t x,
                        int32_t y, lv_event_cb_t cb) {
   lv_obj_t *btn = lv_button_create(scr);
-  lv_obj_set_size(btn, 100, 72);
+  lv_obj_set_size(btn, 88, 56);
   lv_obj_align(btn, align, x, y);
   lv_obj_set_style_bg_color(btn, lv_color_hex(0x3A4A5C), 0);
   lv_obj_set_style_bg_color(btn, lv_color_hex(0x2A3542), LV_STATE_PRESSED);
-  lv_obj_set_style_radius(btn, 12, 0);
+  lv_obj_set_style_radius(btn, 10, 0);
   lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
   lv_obj_t *lbl = lv_label_create(btn);
   lv_label_set_text(lbl, txt);
-  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_32, 0);
+  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_28, 0);
   lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
   lv_obj_center(lbl);
   lv_obj_clear_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
   return btn;
 }
+
+static const uint32_t kDColors[UI_D_COUNT] = {
+    0xA5B4C8,  // D0
+    0x7EB6FF,  // D1
+    0x7FDBCA,  // D2
+    0xC5B4E3,  // D3
+    0xF4A261,  // D4
+    0xE9C46A,  // D5
+    0x90BE6D,  // D6
+    0xFF6B6B,  // D7
+    0xFF8E72,  // D8
+    0x4ECDC4,  // D9
+};
 
 void buildScreen() {
   lv_obj_t *scr = lv_screen_active();
@@ -226,109 +270,101 @@ void buildScreen() {
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
   s_lblTitle = lv_label_create(scr);
-  lv_label_set_text(s_lblTitle, "Spawer — D1/D2/SP + START/STOP");
+  lv_label_set_text(s_lblTitle, "Spawer — D0..D9 (manual) + SP H101 + START/STOP");
   lv_obj_set_style_text_color(s_lblTitle, lv_color_hex(0xE8EEF7), 0);
-  lv_obj_set_style_text_font(s_lblTitle, &lv_font_montserrat_28, 0);
-  lv_obj_align(s_lblTitle, LV_ALIGN_TOP_MID, 0, 10);
+  lv_obj_set_style_text_font(s_lblTitle, &lv_font_montserrat_18, 0);
+  lv_obj_align(s_lblTitle, LV_ALIGN_TOP_MID, 0, 6);
 
-  // Manual D2 = holding 2 (výstupní voda)
-  s_lblOut = lv_label_create(scr);
-  lv_label_set_text(s_lblOut, "D2 Vystup  —.- °C");
-  strncpy(s_txtOut, "D2 Vystup  —.- °C", sizeof(s_txtOut) - 1);
-  lv_obj_set_style_text_color(s_lblOut, lv_color_hex(0x7FDBCA), 0);
-  lv_obj_set_style_text_font(s_lblOut, &lv_font_montserrat_28, 0);
-  lv_obj_align(s_lblOut, LV_ALIGN_TOP_LEFT, 40, 52);
+  // Compact 2×5 grid of D0..D9 (1024×600; small font OK).
+  const int32_t gridTop = 32;
+  const int32_t rowH = 28;
+  const int32_t col0X = 28;
+  const int32_t col1X = 520;
+  for (int i = 0; i < UI_D_COUNT; i++) {
+    int row = i / 2;
+    int col = i % 2;
+    int32_t x = (col == 0) ? col0X : col1X;
+    int32_t y = gridTop + row * rowH;
 
-  // Manual D1 = holding 1 (vstupní voda)
-  s_lblIn = lv_label_create(scr);
-  lv_label_set_text(s_lblIn, "D1 Vstup  —.- °C");
-  strncpy(s_txtIn, "D1 Vstup  —.- °C", sizeof(s_txtIn) - 1);
-  lv_obj_set_style_text_color(s_lblIn, lv_color_hex(0x7EB6FF), 0);
-  lv_obj_set_style_text_font(s_lblIn, &lv_font_montserrat_28, 0);
-  lv_obj_align(s_lblIn, LV_ALIGN_TOP_LEFT, 520, 52);
+    s_lblD[i] = lv_label_create(scr);
+    char init[48];
+    fmtDValue(init, sizeof(init), i, 0, false);
+    lv_label_set_text(s_lblD[i], init);
+    strncpy(s_txtD[i], init, sizeof(s_txtD[i]) - 1);
+    lv_obj_set_style_text_color(s_lblD[i], lv_color_hex(kDColors[i]), 0);
+    lv_obj_set_style_text_font(s_lblD[i], &lv_font_montserrat_14, 0);
+    lv_obj_align(s_lblD[i], LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_set_width(s_lblD[i], 460);
+  }
 
   // SP = holding 101 (not table D)
+  const int32_t spY = gridTop + 5 * rowH + 8;
   s_lblSp = lv_label_create(scr);
-  lv_label_set_text(s_lblSp, "SP H101  —.- °C");
-  strncpy(s_txtSp, "SP H101  —.- °C", sizeof(s_txtSp) - 1);
+  lv_label_set_text(s_lblSp, "SP H101  —.- C");
+  strncpy(s_txtSp, "SP H101  —.- C", sizeof(s_txtSp) - 1);
   lv_obj_set_style_text_color(s_lblSp, lv_color_hex(0xF4A261), 0);
-  lv_obj_set_style_text_font(s_lblSp, &lv_font_montserrat_28, 0);
-  lv_obj_align(s_lblSp, LV_ALIGN_TOP_LEFT, 40, 100);
+  lv_obj_set_style_text_font(s_lblSp, &lv_font_montserrat_22, 0);
+  lv_obj_align(s_lblSp, LV_ALIGN_TOP_LEFT, 28, spY);
 
-  s_btnSpDown = makeSpButton(scr, "−", LV_ALIGN_TOP_LEFT, 420, 90, onSpDownClicked);
-  s_btnSpUp = makeSpButton(scr, "+", LV_ALIGN_TOP_LEFT, 540, 90, onSpUpClicked);
-
-  // D0 Okolní / D3 Cívka
-  s_lblAmb = lv_label_create(scr);
-  lv_label_set_text(s_lblAmb, "D0 Okolni  —.- °C");
-  strncpy(s_txtAmb, "D0 Okolni  —.- °C", sizeof(s_txtAmb) - 1);
-  lv_obj_set_style_text_color(s_lblAmb, lv_color_hex(0xA5B4C8), 0);
-  lv_obj_set_style_text_font(s_lblAmb, &lv_font_montserrat_22, 0);
-  lv_obj_align(s_lblAmb, LV_ALIGN_TOP_LEFT, 40, 160);
-
-  s_lblCoil = lv_label_create(scr);
-  lv_label_set_text(s_lblCoil, "D3 Civka  —.- °C");
-  strncpy(s_txtCoil, "D3 Civka  —.- °C", sizeof(s_txtCoil) - 1);
-  lv_obj_set_style_text_color(s_lblCoil, lv_color_hex(0xA5B4C8), 0);
-  lv_obj_set_style_text_font(s_lblCoil, &lv_font_montserrat_22, 0);
-  lv_obj_align(s_lblCoil, LV_ALIGN_TOP_LEFT, 520, 160);
+  s_btnSpDown = makeSpButton(scr, "-", LV_ALIGN_TOP_LEFT, 360, spY - 8, onSpDownClicked);
+  s_btnSpUp = makeSpButton(scr, "+", LV_ALIGN_TOP_LEFT, 460, spY - 8, onSpUpClicked);
 
   s_lblH100 = lv_label_create(scr);
   lv_label_set_text(s_lblH100, "H100 Start/Stop  —");
   strncpy(s_txtH100, "H100 Start/Stop  —", sizeof(s_txtH100) - 1);
   lv_obj_set_style_text_color(s_lblH100, lv_color_hex(0xFFD166), 0);
-  lv_obj_set_style_text_font(s_lblH100, &lv_font_montserrat_24, 0);
-  lv_obj_align(s_lblH100, LV_ALIGN_TOP_LEFT, 40, 198);
+  lv_obj_set_style_text_font(s_lblH100, &lv_font_montserrat_18, 0);
+  lv_obj_align(s_lblH100, LV_ALIGN_TOP_LEFT, 28, spY + 56);
 
   s_lblH13 = lv_label_create(scr);
   lv_label_set_text(s_lblH13, "H13  —");
   strncpy(s_txtH13, "H13  —", sizeof(s_txtH13) - 1);
   lv_obj_set_style_text_color(s_lblH13, lv_color_hex(0xFF6B6B), 0);
-  lv_obj_set_style_text_font(s_lblH13, &lv_font_montserrat_18, 0);
-  lv_obj_align(s_lblH13, LV_ALIGN_TOP_LEFT, 40, 236);
-  lv_obj_set_width(s_lblH13, BOARD_PANEL_W - 80);
+  lv_obj_set_style_text_font(s_lblH13, &lv_font_montserrat_14, 0);
+  lv_obj_align(s_lblH13, LV_ALIGN_TOP_LEFT, 420, spY + 58);
+  lv_obj_set_width(s_lblH13, BOARD_PANEL_W - 450);
 
   s_btnStart = lv_button_create(scr);
-  lv_obj_set_size(s_btnStart, 420, 140);
-  lv_obj_align(s_btnStart, LV_ALIGN_BOTTOM_LEFT, 48, -52);
+  lv_obj_set_size(s_btnStart, 420, 120);
+  lv_obj_align(s_btnStart, LV_ALIGN_BOTTOM_LEFT, 48, -40);
   lv_obj_set_style_bg_color(s_btnStart, lv_color_hex(0x1F8A4C), 0);
   lv_obj_set_style_bg_color(s_btnStart, lv_color_hex(0x146338), LV_STATE_PRESSED);
-  lv_obj_set_style_radius(s_btnStart, 18, 0);
+  lv_obj_set_style_radius(s_btnStart, 16, 0);
   lv_obj_add_flag(s_btnStart, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(s_btnStart, onStartClicked, LV_EVENT_CLICKED, nullptr);
   s_btnColorState = 0;
 
   lv_obj_t *btnStartLbl = lv_label_create(s_btnStart);
   lv_label_set_text(btnStartLbl, "START");
-  lv_obj_set_style_text_font(btnStartLbl, &lv_font_montserrat_48, 0);
+  lv_obj_set_style_text_font(btnStartLbl, &lv_font_montserrat_40, 0);
   lv_obj_set_style_text_color(btnStartLbl, lv_color_hex(0xFFFFFF), 0);
   lv_obj_center(btnStartLbl);
   lv_obj_clear_flag(btnStartLbl, LV_OBJ_FLAG_CLICKABLE);
 
   s_btnStop = lv_button_create(scr);
-  lv_obj_set_size(s_btnStop, 420, 140);
-  lv_obj_align(s_btnStop, LV_ALIGN_BOTTOM_RIGHT, -48, -52);
+  lv_obj_set_size(s_btnStop, 420, 120);
+  lv_obj_align(s_btnStop, LV_ALIGN_BOTTOM_RIGHT, -48, -40);
   lv_obj_set_style_bg_color(s_btnStop, lv_color_hex(0xB33A3A), 0);
   lv_obj_set_style_bg_color(s_btnStop, lv_color_hex(0x7A2424), LV_STATE_PRESSED);
-  lv_obj_set_style_radius(s_btnStop, 18, 0);
+  lv_obj_set_style_radius(s_btnStop, 16, 0);
   lv_obj_add_flag(s_btnStop, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(s_btnStop, onStopClicked, LV_EVENT_CLICKED, nullptr);
 
   lv_obj_t *btnStopLbl = lv_label_create(s_btnStop);
   lv_label_set_text(btnStopLbl, "STOP");
-  lv_obj_set_style_text_font(btnStopLbl, &lv_font_montserrat_48, 0);
+  lv_obj_set_style_text_font(btnStopLbl, &lv_font_montserrat_40, 0);
   lv_obj_set_style_text_color(btnStopLbl, lv_color_hex(0xFFFFFF), 0);
   lv_obj_center(btnStopLbl);
   lv_obj_clear_flag(btnStopLbl, LV_OBJ_FLAG_CLICKABLE);
 
   s_lblStatus = lv_label_create(scr);
   const char *st0 =
-      "Manual D0..=H0..  |  SP=FC16 H101 +/-0.5  |  START/STOP=FC16 H100";
+      "D0..D9=FC03 H0..H9  |  SP=FC16 H101 +/-0.5  |  START/STOP=FC16 H100";
   lv_label_set_text(s_lblStatus, st0);
   strncpy(s_txtStatus, st0, sizeof(s_txtStatus) - 1);
   lv_obj_set_style_text_color(s_lblStatus, lv_color_hex(0x8A93A3), 0);
   lv_obj_set_style_text_font(s_lblStatus, &lv_font_montserrat_14, 0);
-  lv_obj_align(s_lblStatus, LV_ALIGN_BOTTOM_MID, 0, -10);
+  lv_obj_align(s_lblStatus, LV_ALIGN_BOTTOM_MID, 0, -6);
   lv_obj_set_width(s_lblStatus, BOARD_PANEL_W - 80);
   lv_label_set_long_mode(s_lblStatus, LV_LABEL_LONG_WRAP);
 }
@@ -408,7 +444,7 @@ bool uiTestInit(void) {
   s_touchArmed = true;
 
   s_ok = true;
-  Serial.printf("[UI] OK %dx%d touch=%s (D0-D3 + SP H101 ±0.5 + START/STOP)\n",
+  Serial.printf("[UI] OK %dx%d touch=%s (D0-D9 grid + SP H101 ±0.5 + START/STOP)\n",
                 BOARD_PANEL_W, BOARD_PANEL_H, s_touch ? "GT911" : "none");
   return true;
 }
@@ -429,46 +465,19 @@ void uiTestUpdate(const UiTestSnap *snap) {
   s_last = *snap;
   s_last.status = nullptr;
 
-  char buf[96];
+  char buf[64];
   char t[16];
 
-  if (snap->haveOutlet) {
-    fmtTempC(t, sizeof(t), snap->outletRaw);
-    snprintf(buf, sizeof(buf), "D2 Vystup  %s °C", t);
-  } else {
-    snprintf(buf, sizeof(buf), "D2 Vystup  —.- °C");
+  for (int i = 0; i < UI_D_COUNT; i++) {
+    fmtDValue(buf, sizeof(buf), i, snap->dRaw[i], snap->haveD[i]);
+    setLabelIfChanged(s_lblD[i], s_txtD[i], sizeof(s_txtD[i]), buf);
   }
-  setLabelIfChanged(s_lblOut, s_txtOut, sizeof(s_txtOut), buf);
-
-  if (snap->haveInlet) {
-    fmtTempC(t, sizeof(t), snap->inletRaw);
-    snprintf(buf, sizeof(buf), "D1 Vstup  %s °C", t);
-  } else {
-    snprintf(buf, sizeof(buf), "D1 Vstup  —.- °C");
-  }
-  setLabelIfChanged(s_lblIn, s_txtIn, sizeof(s_txtIn), buf);
-
-  if (snap->haveAmbient) {
-    fmtTempC(t, sizeof(t), snap->ambientRaw);
-    snprintf(buf, sizeof(buf), "D0 Okolni  %s °C", t);
-  } else {
-    snprintf(buf, sizeof(buf), "D0 Okolni  —.- °C");
-  }
-  setLabelIfChanged(s_lblAmb, s_txtAmb, sizeof(s_txtAmb), buf);
-
-  if (snap->haveCoil) {
-    fmtTempC(t, sizeof(t), snap->coilRaw);
-    snprintf(buf, sizeof(buf), "D3 Civka  %s °C", t);
-  } else {
-    snprintf(buf, sizeof(buf), "D3 Civka  —.- °C");
-  }
-  setLabelIfChanged(s_lblCoil, s_txtCoil, sizeof(s_txtCoil), buf);
 
   if (snap->haveSp) {
     fmtTempC(t, sizeof(t), snap->spRaw);
-    snprintf(buf, sizeof(buf), "SP H%u  %s °C", (unsigned)snap->spAddr, t);
+    snprintf(buf, sizeof(buf), "SP H%u  %s C", (unsigned)snap->spAddr, t);
   } else {
-    snprintf(buf, sizeof(buf), "SP H%u  —.- °C",
+    snprintf(buf, sizeof(buf), "SP H%u  —.- C",
              (unsigned)(snap->spAddr ? snap->spAddr : 101));
   }
   setLabelIfChanged(s_lblSp, s_txtSp, sizeof(s_txtSp), buf);
@@ -529,9 +538,8 @@ void uiTestUpdateBasic(uint16_t h1, bool haveH1, uint16_t h100, bool haveH100,
                        const char *status) {
   UiTestSnap s = s_last;
   // Compat: h1 historically meant water temp — map to D1 vstup (holding 1).
-  s.inletRaw = h1;
-  s.haveInlet = haveH1;
-  if (s.inletAddr == 0) s.inletAddr = 1;
+  s.dRaw[1] = h1;
+  s.haveD[1] = haveH1;
   s.h100 = h100;
   s.haveH100 = haveH100;
   s.h101 = h101;
