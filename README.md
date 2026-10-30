@@ -15,18 +15,18 @@ Manual dump: `..\MANUAL_POOLEX_OSPA_param.pdf`
 | 2 | **D2** outlet | **raw×0.1** °C |
 | 3 | **D3** coil | **raw×0.1** °C |
 | 4..9 | **D4..D9** status | ZAP/VYP / status |
-| **99** | **C0** heating setpoint (SP) | **Integer °C** (15–40); FC16 ±1 — **try H99** (Milan) |
 | **100** | **Start/Stop** | **FC16** START=1 / STOP=0 — **KEEP** |
-| **101** | **C1** hysteresis (dT restart) | Integer °C — **NOT SP** (Milan) |
-| 102..111 | **C2..C11** | Integer °C / 0–1 flags |
+| **101** | **C0** heating setpoint (SP) | **Integer °C** (15–40); FC16 ±1 — Milan STOP |
+| **102** | **C1** hysteresis (dT restart) | Integer °C — **NOT SP** |
+| 103..112 | **C2..C11** | Integer °C / 0–1 flags |
 
 PDF has **no Modbus addresses**. Map is project convention + Milan live feedback.  
-**Start stays on H100.** Previous SP@H101 was wrong (H101 = hysteresis).
+**C table starts at H101.** **Start stays on H100.** **SP = C0 = H101** — never H102 (and not H99).
 
 ## Quiet Serial / LCD
 
 - Tags: **`D0=`…`D9=` / `C0=`…`C11=` / `SP=` / `H100=`** (+ `CHANGE`), **`H13=… bits=`**, **`H100_START` / `H100_STOP` / `SP_SET`**
-- LCD: **D0…D9** (D1 int) + **C0…C11** + **C0/SP H99 ±1 °C** + H100 + H101 hyst + H13 + START/STOP
+- LCD: **D0…D9** (D1 int) + **C0…C11** + **C0/SP H101 ±1 °C** + H100 + H13 + START/STOP
 
 ## Flash
 
@@ -43,10 +43,10 @@ Pinout: [`hardware-pinout.md`](hardware-pinout.md)
 
 | Command | Action |
 |---------|--------|
-| *(auto ~1 s)* | FC03 H99–111 (SP+Start+C) + **D0–D9** + DIFF + H500–520 |
+| *(auto ~1 s)* | FC03 H100–112 (Start+C) + **D0–D9** + DIFF + H500–520 |
 | `h100` / `fc16` | START FC16 H100=1 |
 | `stop` / `fc16 0` | STOP FC16 H100=0 |
-| `sp+` / `sp-` / `sp <C>` | C0/SP FC16 **H99** ±1 °C integer (e.g. `sp 28`) |
+| `sp+` / `sp-` / `sp <C>` | C0/SP FC16 **H101** ±1 °C integer (e.g. `sp 28`) |
 | `scan6` / `scanfc` / `diffault` | Serial-only diagnostics |
 | `quiet` / `verbose` / `help` | Serial mode |
 

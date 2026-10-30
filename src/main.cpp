@@ -4,15 +4,15 @@
  * UART RS485: RX=GPIO15, TX=GPIO16 (auto DE/RE)
  * USB log: 115200 (Serial zůstává)
  *
- * LCD (LVGL) op-test: D0–D9 + C0–C11 + SP(C0)@H99 int°C + H100/H13 + START/STOP
+ * LCD (LVGL) op-test: D0–D9 + C0–C11 + SP(C0)@H101 int°C + H100/H13 + START/STOP
  *   → START = quiet-bus FC16 H100=1 (retries); STOP = FC16 H100=0  (KEEP — works)
- *   → SP −/+ = FC16 holding 99 (C0) ±1 °C INTEGER — Milan: try H99 (H101 ≠ SP)
- *   → H101 = hysteresis (manual C1 dT restart), NOT setpoint
+ *   → SP −/+ = FC16 holding 101 (C0) ±1 °C INTEGER — Milan: C0=H101=SP
+ *   → H102 = C1 hysteresis (dT restart) — NOT SP (do not use H102 as SP)
  *   Manual D order = holding 0..9; D1 inlet = INTEGER °C (not ×0.1 like D0/D2/D3)
- *   C map (project): C0@H99, Start@H100, C1@H101 … C11@H111 (Start holes C sequence)
+ *   C map (project): Start@H100; C0@H101 … C11@H112 (C table starts at 101)
  *   Milan: FC06 na této pumpě nic nedělá — Start/Stop/SP = FC16 only
  *   Milan: panel Start → H100 CHANGE 1→0; LCD START/STOP → H100_START / H100_STOP
- *   Milan: do NOT relocate Start off H100; SP on H99 (was wrongly on H101)
+ *   Milan STOP: SP=C0=H101; C1=H102; Start stays H100 — never H102 as SP
  *   Milan DIFFAULT: H13=64 (bit6) ≈ panel „error 6“ — LCD + Serial bits=
  *   Milan: Start/Stop flaky → longer quiet-bus + 2–3 FC16 retries + in-flight lock
  *   Milan multi-press: NEVER hold write-busy across SCAN6/DIFFAULT/SCANFC —
@@ -29,11 +29,11 @@
  *   - verbose: dump bloků + TEMP_ADDR / ERROR_ADDR + pasivní hex frames
  *   - aktivní Modbus poll (slave 1, 9600 8N1):
  *       fast ~1.0 s (priorita Start/C):
- *         FC03 holding 99–111 (qty 13) → H99=C0/SP, H100=Start, H101=C1…H111=C11
+ *         FC03 holding 100–112 (qty 13) → H100=Start, H101=C0/SP, H102=C1…H112=C11
  *         settle, pak FC03 holding 0–9 → D0..D9 (manuál tabulka parametrů)
  *         settle, FC03 holding 7–23 → H7/H12/H13/H20/H23 CHANGE (+ H13 bits)
  *         settle, FC03 holding 500–520 (quiet CHANGE/nonzero) — H500–506 nestačilo
- *         SP = C0 = holding 99 FC16 int°C; Start/Stop = H100 FC16 (KEEP)
+ *         SP = C0 = holding 101 FC16 int°C; Start/Stop = H100 FC16 (KEEP)
  *       SCAN6 (quiet, jen holding raw=6):
  *         FC03 bloky qty 16 přes 0–2047; TO bloky přeskočit; stop po N× TO v řadě
  *         výpis jen ERR6_ADDR=nnn + Hnnn=6 (jednou na hit)
@@ -122,27 +122,26 @@ static const uint16_t MB_H100_START_VALUE = 1;       // panel Start → H100 CHA
 // C params: INTEGER °C / 0-1 (manual).
 // === Manual C → holdings (project map; PDF has no Modbus addrs) ===
 // H100 = Start/Stop FC16 (KEEP — works in practice). NOT C0 / NOT SP.
-// Milan: SP try H99 (C0); H101 = hysteresis (C1), not setpoint.
-// Layout H99..H111: C0, Start, C1..C11 (Start holes the C sequence).
+// Milan STOP: C table starts at H101 → C0=H101=SP, C1=H102, … C11=H112.
+// Do NOT use H102 as SP. Do NOT put SP on H99.
 static const uint16_t MB_D0_AMBIENT_ADDR = 0;        // D0 Okolní teplota
 static const uint16_t MB_INLET_ADDR = 1;             // D1 Vstupní voda (int °C)
 static const uint16_t MB_OUTLET_ADDR = 2;            // D2 Výstupní voda (×0.1)
 static const uint16_t MB_D3_COIL_ADDR = 3;           // D3 Teplota cívky (×0.1)
-static const uint16_t MB_SP_ADDR = 99;               // C0/SP holding 99 (FC16) — Milan
+static const uint16_t MB_SP_ADDR = 101;              // C0/SP holding 101 (FC16)
 static const uint16_t MB_SP_STEP_RAW = 1;            // 1 °C integer (manual C0)
 static const uint16_t MB_SP_MIN_RAW = 15;            // C0 min 15 °C (CZ manual)
 static const uint16_t MB_SP_MAX_RAW = 40;            // C0 max 40 °C
-static const uint16_t MB_C0_ADDR = 99;               // C0 = SP @ H99
-static const uint16_t MB_HYST_ADDR = 101;            // C1 hysteresis @ H101 (NOT SP)
+static const uint16_t MB_C0_ADDR = 101;              // C0 = SP @ H101
 static const uint16_t MB_C_COUNT = UI_C_COUNT;       // C0..C11
-// Poll: D0..D9; H99 SP + H100 Start + C1..C11 in one FC03 block 99–111.
+// Poll: D0..D9; H100 Start + C0..C11 in one FC03 block 100–112.
 static const uint16_t MB_TEMP_BLOCK_START = 0;
 static const uint16_t MB_TEMP_BLOCK_QTY = 10;        // H0..H9 = D0..D9 (manual)
-static const uint16_t MB_START_C_BLOCK_START = 99;   // H99 SP + H100 Start + C1..
-static const uint16_t MB_START_C_BLOCK_QTY = 13;     // 99..111 inclusive
-static const uint16_t MB_BLK_OFF_SP = 0;             // vals[0] = H99 C0/SP
-static const uint16_t MB_BLK_OFF_START = 1;          // vals[1] = H100 Start
-static const uint16_t MB_BLK_OFF_C1 = 2;             // vals[2] = H101 C1 hyst
+static const uint16_t MB_START_C_BLOCK_START = 100;  // H100 Start + C0..
+static const uint16_t MB_START_C_BLOCK_QTY = 13;     // 100..112 inclusive
+static const uint16_t MB_BLK_OFF_START = 0;          // vals[0] = H100 Start
+static const uint16_t MB_BLK_OFF_SP = 1;             // vals[1] = H101 C0/SP
+static const uint16_t MB_BLK_OFF_C1 = 2;             // vals[2] = H102 C1 hyst
 static const size_t MAX_FRAME = 256;
 static const size_t PROP_LEN_MIN = 70;
 static const size_t PROP_LEN_MAX = 90;
@@ -256,10 +255,10 @@ static const MbReadReq MB_H0_REQ = {0x03, 0, 1, "FC03 holding 0"};
 static const MbReadReq MB_H1_REQ = {0x03, 1, 1, "FC03 holding 1"};  // fallback
 static const MbReadReq MB_TEMP_BLOCK = {
     0x03, MB_TEMP_BLOCK_START, MB_TEMP_BLOCK_QTY, "FC03 holding 0-9 (D0-D9)"};
-// H99 SP/C0 + H100 Start + H101 C1..H111 C11.
+// H100 Start + H101 C0/SP + H102 C1..H112 C11.
 static const MbReadReq MB_H100_BLOCK = {
     0x03, MB_START_C_BLOCK_START, MB_START_C_BLOCK_QTY,
-    "FC03 holding 99-111 (SP+Start+C1..C11)"};
+    "FC03 holding 100-112 (Start+C0..C11)"};
 static const MbReadReq MB_DIFFWATCH_BLOCK = {
     0x03, MB_DIFFWATCH_START, MB_DIFFWATCH_QTY, "FC03 holding 7-23 DIFF watch"};
 static const MbReadReq MB_H500_BLOCK = {0x03, MB_H500_ADDR, MB_H500_QTY,
@@ -298,11 +297,11 @@ static uint32_t mbTimeoutCount = 0;
 static uint16_t lastH0 = 0;          // legacy / D0 alias
 static uint16_t lastH1 = 0;          // alias inlet when MB_INLET_ADDR==1
 static uint16_t lastD[MB_TEMP_BLOCK_QTY] = {0};  // D0..D9
-static uint16_t lastSpRaw = 0;       // C0/SP @ H99 — integer °C
+static uint16_t lastSpRaw = 0;       // C0/SP @ H101 — integer °C
 static uint16_t lastC[UI_C_COUNT] = {};
 static bool haveC[UI_C_COUNT] = {};
 static uint16_t lastH100 = 0;
-static uint16_t lastH101 = 0;        // C1 hysteresis @ H101 (NOT SP)
+static uint16_t lastH101 = 0;        // same physical as SP/C0 when MB_SP_ADDR==101
 static uint16_t lastDiffWatch[MB_DIFFWATCH_N] = {0};
 static uint16_t lastH13 = 0;
 static uint16_t lastH500[MB_H500_QTY] = {0};
@@ -1209,50 +1208,46 @@ static void absorbTempBlock(const uint16_t *vals) {
   haveH1 = haveD[1];
 
   int iSp = tempBlockIndex(MB_SP_ADDR);  // only if SP remapped into 0–9
-  // SP defaults to H99 (absorbed from 99–111 block); keep path if remapped.
+  // SP defaults to H101 (absorbed from 100–112 block); keep path if remapped.
   if (iSp >= 0) {
     emitHoldingWatchQuiet("SP", vals[iSp], &lastSpRaw, &haveSp);
   }
 }
 
-// Absorb FC03 holding 99–111:
-//   vals[0]=H99 C0/SP, vals[1]=H100 Start, vals[2]=H101 C1 hyst, … vals[12]=H111 C11.
-// C index → offset: C0→0; Ci→i+1 for i≥1 (Start occupies offset 1).
-static uint16_t cBlockOffset(uint16_t cIdx) {
-  if (cIdx == 0) return MB_BLK_OFF_SP;
-  return (uint16_t)(cIdx + 1);
-}
-
+// Absorb FC03 holding 100–112:
+//   vals[0]=H100 Start, vals[1]=H101 C0/SP, vals[2]=H102 C1, … vals[12]=H112 C11.
+// C index → offset: Ci → i+1 (Start occupies offset 0).
 static void absorbStartAndCBlock(const uint16_t *vals, uint16_t qty) {
   if (!vals || qty < 1) return;
-  // H99 = C0 / SP — integer °C (manual C0), never ×0.1.
-  emitHoldingWatchQuiet("C0", vals[MB_BLK_OFF_SP], &lastC[0], &haveC[0]);
-  if (MB_SP_ADDR == MB_C0_ADDR) {
-    emitHoldingWatchQuiet("SP", vals[MB_BLK_OFF_SP], &lastSpRaw, &haveSp);
-  }
-  if (qty <= MB_BLK_OFF_START) return;
   emitHoldingWatch("H100", vals[MB_BLK_OFF_START], &lastH100, &haveH100);
-  if (qty <= MB_BLK_OFF_C1) return;
-  // H101 = C1 hysteresis (NOT SP) — Milan
-  lastH101 = vals[MB_BLK_OFF_C1];
+  if (qty <= MB_BLK_OFF_SP) return;
+  // H101 = C0 / SP — integer °C (manual C0), never ×0.1. NOT H102.
+  lastH101 = vals[MB_BLK_OFF_SP];
   haveH101 = true;
-  for (uint16_t i = 1; i < MB_C_COUNT; i++) {
-    uint16_t idx = cBlockOffset(i);
+  for (uint16_t i = 0; i < MB_C_COUNT; i++) {
+    uint16_t idx = (uint16_t)(MB_BLK_OFF_SP + i);  // C0 at offset 1
     if (idx >= qty) break;
     char tag[8];
     snprintf(tag, sizeof(tag), "C%u", (unsigned)i);
     emitHoldingWatchQuiet(tag, vals[idx], &lastC[i], &haveC[i]);
   }
+  if (MB_SP_ADDR == MB_C0_ADDR) {
+    emitHoldingWatchQuiet("SP", vals[MB_BLK_OFF_SP], &lastSpRaw, &haveSp);
+  }
 }
 
-// Legacy single-word path — H101 is hysteresis (C1), never SP.
-static void absorbH101Hysteresis(uint16_t v101) {
+// Legacy single-word path — H101 is C0/SP (Milan STOP), never H102.
+static void absorbSpFromH101(uint16_t v101) {
   lastH101 = v101;
   haveH101 = true;
-  if (MB_C_COUNT > 1) {
-    emitHoldingWatchQuiet("C1", v101, &lastC[1], &haveC[1]);
+  if (MB_C_COUNT > 0) {
+    emitHoldingWatchQuiet("C0", v101, &lastC[0], &haveC[0]);
   }
-  emitHoldingWatch("H101", v101, &lastH101, &haveH101);
+  if (MB_SP_ADDR == 101) {
+    emitHoldingWatchQuiet("SP", v101, &lastSpRaw, &haveSp);
+  } else {
+    emitHoldingWatch("H101", v101, &lastH101, &haveH101);
+  }
 }
 
 static void pushUiSnap(const char *status) {
@@ -2086,7 +2081,7 @@ static void h100WriteBeginWindow(const char *why) {
   // caused H100_START tap IGNORED (busy/debounce) on Milan multi-press.
 }
 
-// Fast confirm: FC03 holding 99–111 (SP + Start + C) — keep write-busy short.
+// Fast confirm: FC03 holding 100–112 (Start + C0/SP + C) — keep write-busy short.
 // expectWrite: value we just FC16'd — print "(confirm)" even when unchanged.
 // Returns true when read OK.
 static bool h100ConfirmH100Only(uint16_t expectWrite, const char *phase) {
@@ -2305,8 +2300,8 @@ static void runH100StopWrite(bool fromUi) {
   runH100WriteValue(0, fromUi, "H100_STOP");
 }
 
-// FC16 setpoint write — integer °C (manual C0) @ H99, NOT ×0.1.
-// Confirm via FC03 H99–111 (SP + Start + C1..C11). Start stays on H100.
+// FC16 setpoint write — integer °C (manual C0) @ H101, NOT ×0.1.
+// Confirm via FC03 H100–112 (Start + C0/SP + C1..C11). Start stays on H100.
 static void runSpWriteRaw(uint16_t raw, bool fromUi) {
   if (!writeBeginGuard("SP_SET")) return;
 
@@ -2620,14 +2615,14 @@ static void runModbusPollCycle() {
   mbScanBusy = false;
 }
 
-// Fast ~1 s: H99 SP + H100 Start + C1.. FIRST (priorita), settle, pak D0–D9.
+// Fast ~1 s: H100 Start + H101 C0/SP + C1.. FIRST (priorita), settle, pak D0–D9.
 // EXC 0x06 / TO: keep last good; retry+backoff; quiet log once (ne „fail“ flood).
 static void pollFastHoldings() {
   if (!mbPollEnabled || mbScanBusy) return;
   if ((int32_t)(millis() - mbNextFastMs) < 0) return;
   mbNextFastMs = millis() + MB_FAST_POLL_MS;
 
-  // Priorita: blok 99–111 (SP + Start + C) dřív než D (Milan H100 reliability)
+  // Priorita: blok 100–112 (Start + C) dřív než D (Milan H100 reliability)
   uint16_t v100[MB_START_C_BLOCK_QTY] = {0};
   uint8_t exc100 = 0;
   bool h100Cleared10 = false;
@@ -2726,13 +2721,13 @@ static void printLoopHelp() {
 }
 
 static void printListenReminder() {
-  Serial.println(F("Mode quiet: H99 SP + H100 Start + C1.. + D0-D9 + DIFF + H500 ~1s."));
+  Serial.println(F("Mode quiet: H100 Start + H101 C0/SP + C1.. + D0-D9 + DIFF + H500 ~1s."));
   Serial.println(F("D0=..D9=/C0=..C11=/SP=/H100= + CHANGE. DIFF: H7/H12/H13/H20/H23."));
   Serial.println(F("H13=N (0x..) bits=B (Milan: 64 → bits=6 ≈ panel error 6)."));
   Serial.println(F("SCAN6: FC03 raw=6. SCANFC: Serial-only. DIFFAULT: Serial+auto FC16."));
   Serial.println(F("EXC6 Slave Busy → H100 busy/ex6; ≠ ERR6_ADDR / H13 bitfield."));
-  Serial.println(F("LCD: D+C + SP±1 int C (H99 C0) + START/STOP (H100 KEEP); H101=hyst."));
-  Serial.println(F("D1 inlet=int C; D0/D2/D3 x0.1; C0=H99 SP; C1=H101 hyst; Start=H100."));
+  Serial.println(F("LCD: D+C + SP±1 int C (H101 C0) + START/STOP (H100 KEEP); H102=C1."));
+  Serial.println(F("D1 inlet=int C; D0/D2/D3 x0.1; C0=H101 SP; C1=H102; Start=H100."));
   Serial.println(F("verbose = dump. poll = FC03 temp/error. BOOT=flash."));
 }
 
@@ -2746,10 +2741,10 @@ static void printHelp() {
   Serial.println(F("  h100 | start100 | fc16 — quiet-bus FC16 H100=1 (START, retries)"));
   Serial.println(F("  stop | stop100 | fc16 0 — quiet-bus FC16 H100=0 (STOP, retries)"));
   Serial.println(F("  fc16 1 — same as START; LCD has big START + STOP"));
-  Serial.println(F("  sp+ | sp- | sp <C> — C0/SP FC16 H99 ±1 C INTEGER (manual C0 15-40)"));
+  Serial.println(F("  sp+ | sp- | sp <C> — C0/SP FC16 H101 ±1 C INTEGER (manual C0 15-40)"));
   Serial.println(F("  h100alt         — FC16 first, then FC06 experiment (ACK vs EXC/TO)"));
   Serial.println(F("  fc06 [0|1]      — experiment FC06 (na teto pumpe typicky nic)"));
-  Serial.println(F("  Start/Stop=H100 KEEP; SP=C0=H99; H101=hyst(C1). LCD: D + C + SP."));
+  Serial.println(F("  Start/Stop=H100 KEEP; SP=C0=H101; C1=H102 (NOT SP). LCD: D + C + SP."));
   Serial.println(F("  start | s       — START_PROBE FC06 kandidati 0-31 (auto OFF)"));
   Serial.println(F("  nopol | pollon | quiet | verbose | echo | echoon/off | tx | loop"));
   Serial.println(F("Fault lit on panel → type scanfc (Serial-only; then scan6 / diffault)."));
@@ -3045,16 +3040,16 @@ void setup() {
   }
 
   Serial.println();
-  Serial.println(F("=== Spawer RS485 + LCD (D + C + SP@H99 + H100 Start KEEP) ==="));
+  Serial.println(F("=== Spawer RS485 + LCD (D + C + SP@H101 + H100 Start KEEP) ==="));
   Serial.printf("Board: Waveshare ESP32-S3-Touch-LCD-7B (USB CDC)\n");
   Serial.printf("Bus UART: RX=GPIO%d TX=GPIO%d (auto DE/RE) @ %lu 8N1\n",
                 RS485_RX_PIN, RS485_TX_PIN, (unsigned long)busBaud);
   Serial.printf(
-      "D0=H%u..D9 (D1 int) | C0/SP=H%u | H101=hyst(C1) | Start=H%u KEEP\n",
+      "D0=H%u..D9 (D1 int) | C0/SP=H%u | C1=H102 | Start=H%u KEEP\n",
       (unsigned)MB_D0_AMBIENT_ADDR, (unsigned)MB_SP_ADDR,
       (unsigned)MB_H100_START_ADDR);
   Serial.println(F("Quiet: D=/C=/SP=/H100= + H13 bits= + SP_SET / H100_START"));
-  Serial.println(F("FC16 H100 Start/Stop KEEP + FC16 H99 C0/SP int; H101≠SP."));
+  Serial.println(F("FC16 H100 Start/Stop KEEP + FC16 H101 C0/SP int; H102≠SP."));
   Serial.println(F("SCANFC = Serial-only. H13=64 bits=6 ≈ panel err 6."));
   Serial.println(F("BOOT 7B = download. TO → A<->B. REFLASH: pio run -t upload."));
   printHelp();
