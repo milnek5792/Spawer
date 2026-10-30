@@ -128,12 +128,16 @@ static const uint16_t MB_D0_AMBIENT_ADDR = 0;        // D0 Okolní teplota
 static const uint16_t MB_INLET_ADDR = 1;             // D1 Vstupní voda (int °C)
 static const uint16_t MB_OUTLET_ADDR = 2;            // D2 Výstupní voda (×0.1)
 static const uint16_t MB_D3_COIL_ADDR = 3;           // D3 Teplota cívky (×0.1)
-static const uint16_t MB_SP_ADDR = 101;              // C0/SP holding 101 (FC16)
+// SP ± / FC16 MUST use holding 101 (C0) only — never H102 (C1 hyster).
+static const uint16_t MB_SP_ADDR = UI_SP_HOLDING;    // C0/SP = 101
 static const uint16_t MB_SP_STEP_RAW = 1;            // 1 °C integer (manual C0)
 static const uint16_t MB_SP_MIN_RAW = 15;            // C0 min 15 °C (CZ manual)
 static const uint16_t MB_SP_MAX_RAW = 40;            // C0 max 40 °C
-static const uint16_t MB_C0_ADDR = 101;              // C0 = SP @ H101
+static const uint16_t MB_C0_ADDR = UI_C_HOLDING_BASE;  // C0 = SP @ H101
 static const uint16_t MB_C_COUNT = UI_C_COUNT;       // C0..C11
+static_assert(MB_SP_ADDR == 101, "SP must be H101 (C0)");
+static_assert(MB_C0_ADDR == 101, "C0 must be H101");
+static_assert(UI_C_HOLDING(1) == 102, "C1 must be H102");
 // Poll: D0..D9; H100 Start + C0..C11 in one FC03 block 100–112.
 static const uint16_t MB_TEMP_BLOCK_START = 0;
 static const uint16_t MB_TEMP_BLOCK_QTY = 10;        // H0..H9 = D0..D9 (manual)
@@ -1260,8 +1264,15 @@ static void pushUiSnap(const char *status) {
     s.cRaw[i] = lastC[i];
     s.haveC[i] = haveC[i];
   }
+  // SP line and C0 grid MUST show the same H101 value (never C1/H102).
+  if (haveC[0] && MB_SP_ADDR == MB_C0_ADDR) {
+    lastSpRaw = lastC[0];
+    haveSp = true;
+    lastH101 = lastC[0];
+    haveH101 = true;
+  }
   s.spRaw = lastSpRaw;
-  s.spAddr = MB_SP_ADDR;
+  s.spAddr = MB_SP_ADDR;  // always 101
   s.haveSp = haveSp;
   s.h100 = lastH100;
   s.haveH100 = haveH100;
@@ -3040,7 +3051,8 @@ void setup() {
   }
 
   Serial.println();
-  Serial.println(F("=== Spawer RS485 + LCD (D + C + SP@H101 + H100 Start KEEP) ==="));
+  Serial.println(F("=== Spawer RS485 + LCD (SP=C0=H101 ± FC16; C1=H102; H100 Start) ==="));
+  Serial.println(F("D scale: manual no tenths stated; wire D0/D2/D3 x0.1 live, D1 int Milan"));
   Serial.printf("Board: Waveshare ESP32-S3-Touch-LCD-7B (USB CDC)\n");
   Serial.printf("Bus UART: RX=GPIO%d TX=GPIO%d (auto DE/RE) @ %lu 8N1\n",
                 RS485_RX_PIN, RS485_TX_PIN, (unsigned long)busBaud);

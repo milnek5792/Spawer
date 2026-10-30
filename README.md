@@ -10,23 +10,24 @@ Manual dump: `..\MANUAL_POOLEX_OSPA_param.pdf`
 
 | Holding | Manual | Scale / notes |
 |--------:|--------|---------------|
-| 0 | **D0** ambient | **raw×0.1** °C |
-| **1** | **D1** inlet water | **Integer °C** (not ×0.1 — Milan) |
-| 2 | **D2** outlet | **raw×0.1** °C |
-| 3 | **D3** coil | **raw×0.1** °C |
+| 0 | **D0** ambient | **raw×0.1** °C (live Modbus; manual does **not** state tenths) |
+| **1** | **D1** inlet water | **Integer °C** (Milan re-verify — ×0.1 looked wrong) |
+| 2 | **D2** outlet | **raw×0.1** °C (live) |
+| 3 | **D3** coil | **raw×0.1** °C (live) |
 | 4..9 | **D4..D9** status | ZAP/VYP / status |
 | **100** | **Start/Stop** | **FC16** START=1 / STOP=0 — **KEEP** |
-| **101** | **C0** heating setpoint (SP) | **Integer °C** (15–40); FC16 ±1 — Milan STOP |
-| **102** | **C1** hysteresis (dT restart) | Integer °C — **NOT SP** |
+| **101** | **C0** heating setpoint (**SP**) | **Integer °C** (15–40); **FC16 ± only here** |
+| **102** | **C1** hysteresis (dT restart) | Integer °C — **NOT SP** (do not ±) |
 | 103..112 | **C2..C11** | Integer °C / 0–1 flags |
 
-PDF has **no Modbus addresses**. Map is project convention + Milan live feedback.  
-**C table starts at H101.** **Start stays on H100.** **SP = C0 = H101** — never H102 (and not H99).
+PDF has **no Modbus addresses** and **no 0.1 °C wire resolution** for D0–D3 (only °C ranges as measured).  
+C-table setpoints in the manual are **whole °C**. Wire D0/D2/D3×0.1 is live RS485 evidence (raw 200≈20.0).  
+**C grid:** C0=H101, C1=H102, … C11=H112. **Start = H100.** **SP label + FC16 ± = C0/H101 only.**
 
 ## Quiet Serial / LCD
 
 - Tags: **`D0=`…`D9=` / `C0=`…`C11=` / `SP=` / `H100=`** (+ `CHANGE`), **`H13=… bits=`**, **`H100_START` / `H100_STOP` / `SP_SET`**
-- LCD: **D0…D9** (D1 int) + **C0…C11** + **C0/SP H101 ±1 °C** + H100 + H13 + START/STOP
+- LCD: **D** with scale tags (`×.1` / `int`) + **C0 H101 … C11 H112** + **SP=C0 H101 ± FC16** (buttons **SP−/SP+**) + H100 + H13 + START/STOP
 
 ## Flash
 
