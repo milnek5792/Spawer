@@ -22,7 +22,8 @@ Manual dump: `..\MANUAL_POOLEX_OSPA_param.pdf`
 
 PDF has **no Modbus addresses** and **no 0.1 °C wire resolution** for D0–D3 (only °C ranges as measured).  
 C-table setpoints in the manual are **whole °C**. Wire D0/D2/D3×0.1 is live RS485 evidence (raw 200≈20.0).  
-**C grid:** C0=H101, C1=H102, … C11=H112. **Start = H100.** **SP label + FC16 ± = C0/H101 only.**
+**C grid:** C0=H101, C1=H102, … C11=H112. **Start = H100.** **SP label + FC16 ± = C0/H101 only.**  
+FC03 block 100–112 → absorb `C[i]=vals[1+i]` (C0←vals[1]=H101). Never `vals[i]` (off-by-one → SP=H102). Serial: `H101= C0= SP=` must match.
 
 ## Quiet Serial / LCD
 

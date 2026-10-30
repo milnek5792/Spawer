@@ -1218,39 +1218,63 @@ static void absorbTempBlock(const uint16_t *vals) {
   }
 }
 
-// Absorb FC03 holding 100–112:
+// Absorb FC03 holding 100–112 (block MUST start at H100):
 //   vals[0]=H100 Start, vals[1]=H101 C0/SP, vals[2]=H102 C1, … vals[12]=H112 C11.
-// C index → offset: Ci → i+1 (Start occupies offset 0).
+// OFF-BY-ONE FIX: C[i] = vals[1+i]  (C0=H101). NEVER C[i]=vals[i] (that maps
+// C0→H100 Start and C1→H101 SP — Milan: C1 shows SP, SP shows H102).
+static_assert(MB_BLK_OFF_START == 0, "H100 Start = vals[0]");
+static_assert(MB_BLK_OFF_SP == 1, "H101 C0/SP = vals[1]");
+static_assert(MB_BLK_OFF_C1 == 2, "H102 C1 = vals[2]");
 static void absorbStartAndCBlock(const uint16_t *vals, uint16_t qty) {
   if (!vals || qty < 1) return;
-  emitHoldingWatch("H100", vals[MB_BLK_OFF_START], &lastH100, &haveH100);
-  if (qty <= MB_BLK_OFF_SP) return;
-  // H101 = C0 / SP — integer °C (manual C0), never ×0.1. NOT H102.
-  lastH101 = vals[MB_BLK_OFF_SP];
-  haveH101 = true;
+  emitHoldingWatch("H100", vals[0], &lastH100, &haveH100);
+  if (qty < 2) return;
+
+  // H101 only — integer °C (manual C0). NOT H102.
+  const uint16_t vC0 = vals[1];
+  const bool c0First = !haveC[0];
+  const bool c0Changed = haveC[0] && lastC[0] != vC0;
+
   for (uint16_t i = 0; i < MB_C_COUNT; i++) {
-    uint16_t idx = (uint16_t)(MB_BLK_OFF_SP + i);  // C0 at offset 1
+    // Explicit 1+i — Start occupies vals[0].
+    const uint16_t idx = (uint16_t)(1u + i);
     if (idx >= qty) break;
     char tag[8];
     snprintf(tag, sizeof(tag), "C%u", (unsigned)i);
     emitHoldingWatchQuiet(tag, vals[idx], &lastC[i], &haveC[i]);
   }
-  if (MB_SP_ADDR == MB_C0_ADDR) {
-    emitHoldingWatchQuiet("SP", vals[MB_BLK_OFF_SP], &lastSpRaw, &haveSp);
+
+  lastH101 = vC0;
+  haveH101 = true;
+  lastSpRaw = vC0;
+  haveSp = true;
+  // C0 already set in loop from vals[1]; re-assert so SP± cannot drift to H102.
+  if (MB_C_COUNT > 0) {
+    lastC[0] = vC0;
+    haveC[0] = true;
+  }
+
+  // Serial proof: C0= must match H101= (same raw). SP± uses this word only.
+  // First sample + CHANGE — not every quiet poll.
+  if (c0First || c0Changed) {
+    Serial.printf("H101=%u C0=%u SP=%u\n", (unsigned)vC0, (unsigned)vC0,
+                  (unsigned)vC0);
   }
 }
 
 // Legacy single-word path — H101 is C0/SP (Milan STOP), never H102.
 static void absorbSpFromH101(uint16_t v101) {
+  const bool first = !haveH101;
+  const bool changed = haveH101 && lastH101 != v101;
   lastH101 = v101;
   haveH101 = true;
   if (MB_C_COUNT > 0) {
     emitHoldingWatchQuiet("C0", v101, &lastC[0], &haveC[0]);
   }
-  if (MB_SP_ADDR == 101) {
-    emitHoldingWatchQuiet("SP", v101, &lastSpRaw, &haveSp);
-  } else {
-    emitHoldingWatch("H101", v101, &lastH101, &haveH101);
+  emitHoldingWatchQuiet("SP", v101, &lastSpRaw, &haveSp);
+  if (first || changed) {
+    Serial.printf("H101=%u C0=%u SP=%u\n", (unsigned)v101, (unsigned)v101,
+                  (unsigned)v101);
   }
 }
 
@@ -1264,20 +1288,20 @@ static void pushUiSnap(const char *status) {
     s.cRaw[i] = lastC[i];
     s.haveC[i] = haveC[i];
   }
-  // SP line and C0 grid MUST show the same H101 value (never C1/H102).
-  if (haveC[0] && MB_SP_ADDR == MB_C0_ADDR) {
+  // SP± and H101 MUST equal C0 (vals[1]/H101). Never C1 / lastC[1] / H102.
+  if (haveC[0]) {
     lastSpRaw = lastC[0];
     haveSp = true;
     lastH101 = lastC[0];
     haveH101 = true;
   }
-  s.spRaw = lastSpRaw;
-  s.spAddr = MB_SP_ADDR;  // always 101
-  s.haveSp = haveSp;
+  s.spRaw = haveC[0] ? lastC[0] : lastSpRaw;
+  s.spAddr = MB_SP_ADDR;  // always 101 — FC16 ± only here
+  s.haveSp = haveSp || haveC[0];
   s.h100 = lastH100;
   s.haveH100 = haveH100;
-  s.h101 = lastH101;
-  s.haveH101 = haveH101;
+  s.h101 = haveC[0] ? lastC[0] : lastH101;
+  s.haveH101 = haveH101 || haveC[0];
   s.h13 = lastH13;
   s.haveH13 = haveH13;
   s.status = status;
