@@ -6,28 +6,22 @@ Firmware for **Waveshare ESP32-S3-Touch-LCD-7B** — Modbus RTU master on RS485 
 `C:\Users\mnekv\Documents\Arduino\Spawer_Ospa\spawer_rs485_sniffer`  
 Manual dump: `..\MANUAL_POOLEX_OSPA_param.pdf`
 
-## Manual map (table D = holding from address 0)
+## Manual map
 
-| Holding | Manual | LCD / Serial |
-|--------:|--------|--------------|
-| 0 | **D0** Okolní teplota | `D0=` / D0 Okolni (°C) |
-| 1 | **D1** Teplota vstupní vody | `D1=` / D1 Vstup (°C) |
-| 2 | **D2** Výstupní teplota vody | `D2=` / D2 Vystup (°C) |
-| 3 | **D3** Teplota cívky | `D3=` / D3 Civka (°C) |
-| 4 | **D4** Kompresor | `D4=` / ZAP/VYP |
-| 5 | **D5** Ventilátor | `D5=` / ZAP/VYP |
-| 6 | **D6** 4-cestný ventil | `D6=` / ZAP/VYP |
-| 7 | **D7** Ochrana vysoký tlak | `D7=` / HiTlak |
-| 8 | **D8** Ochrana nízký tlak | `D8=` / LoTlak |
-| 9 | **D9** Snímač průtoku | `D9=` / Prutok |
-| **100** | Start/Stop | `H100=` — **FC16** START=1 / STOP=0 |
-| **101** | **Setpoint** (not table D) | `SP=` — **FC16** ±0.5 °C (raw×0.1) |
+| Holding | Manual | Scale / notes |
+|--------:|--------|---------------|
+| 0..9 | **D0..D9** status | D0–D3 measured temps **raw×0.1** °C (live 200→20.0); D4–D9 ZAP/VYP |
+| **100** | **Start/Stop** | **FC16** START=1 / STOP=0 — **KEEP** (works in practice) |
+| **101** | **C0** heating setpoint (SP) | **Integer °C** (manual C0 15–40); **not** ×0.1 (raw 2 → **2**, not 0.2) |
+| 102..112 | **C1..C11** | Integer °C / 0–1 flags per manual C |
+
+PDF has **no Modbus addresses**. Map above is project convention: D from 0; H100 reserved for Start; C0.. at 101+.  
+Claim “SP = H100” **conflicts** with live working Start on H100 — **Start stays on 100**.
 
 ## Quiet Serial / LCD
 
-- Tags: **`D0=`…`D9=` / `SP=` / `H100=`** (+ `CHANGE`), **`H13=… bits=`**, **`H100_START` / `H100_STOP` / `SP_SET`**
-- LCD: compact **D0…D9** grid (manual names) + **SP H101 ±** + H100 + H13 + START/STOP
-- Busy unlock (PR #7): write-busy released after short H100 confirm — SCAN6/DIFFAULT/SCANFC = Serial-only
+- Tags: **`D0=`…`D9=` / `C0=`…`C11=` / `SP=` / `H100=`** (+ `CHANGE`), **`H13=… bits=`**, **`H100_START` / `H100_STOP` / `SP_SET`**
+- LCD: **D0…D9** + **C0…C11** + **C0/SP H101 ±1 °C** + H100 + H13 + START/STOP
 
 ## Flash
 
@@ -44,10 +38,10 @@ Pinout: [`hardware-pinout.md`](hardware-pinout.md)
 
 | Command | Action |
 |---------|--------|
-| *(auto ~1 s)* | FC03 H100–101 (Start + SP) + **D0–D9** + DIFF + H500–520 |
+| *(auto ~1 s)* | FC03 H100–112 (Start+C) + **D0–D9** + DIFF + H500–520 |
 | `h100` / `fc16` | START FC16 H100=1 |
 | `stop` / `fc16 0` | STOP FC16 H100=0 |
-| `sp+` / `sp-` / `sp <raw>` | setpoint FC16 **H101** |
+| `sp+` / `sp-` / `sp <C>` | C0/SP FC16 **H101** ±1 °C integer (e.g. `sp 28`) |
 | `scan6` / `scanfc` / `diffault` | Serial-only diagnostics |
 | `quiet` / `verbose` / `help` | Serial mode |
 
@@ -59,5 +53,5 @@ Spawer_Ospa/
 └── spawer_rs485_sniffer/     ← this PIO project (git → milnek5792/Spawer)
     ├── platformio.ini
     ├── include/
-    └── src/main.cpp          ← D0–D9 map + SP=101 + H100 Start/Stop
+    └── src/main.cpp
 ```
