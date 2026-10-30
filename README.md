@@ -28,7 +28,7 @@ FC03 block 100–112 → absorb `C[i]=vals[1+i]` (C0←vals[1]=H101). Never `val
 ## Quiet Serial / LCD
 
 - Tags: **`D0=`…`D9=` / `C0=`…`C11=` / `SP=` / `H100=`** (+ `CHANGE`), **`H13=… bits=`**, **`H100_START` / `H100_STOP` / `SP_SET`**
-- LCD: **D** with scale tags (`×.1` / `int`) + **C0 H101 … C11 H112** + **SP=C0 H101 ± FC16** (buttons **SP−/SP+**) + H100 + H13 + START/STOP
+- LCD: **D** with scale tags (`×.1` / `int`) + C grid labels **`C0 SP H101`**, **`C1 hyster H102`**, … + SP widget **`C0 SP H101`** bound to **cRaw[0]/H101 only** (buttons **SP−/SP+**) + H100 + H13 + START/STOP
 
 ## Flash
 

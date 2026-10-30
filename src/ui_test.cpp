@@ -1,4 +1,4 @@
-// ui_test.cpp — Spawer op-test: D0–D9 + C0–C11 (C0=H101=SP) + H100 Start + H13
+// ui_test.cpp — Spawer op-test: D0–D9 + C0–C11 (label "C0 SP H101") + H100 Start + H13
 #include "ui_test.h"
 
 #include "board_7b.h"
@@ -58,6 +58,7 @@ static bool isTempD(int i) { return isTempD_x01(i) || isTempD_int(i); }
 
 // Manual C0–C11 short names; values are integer °C or 0/1 (NOT ×0.1).
 // Holding: Ci → H(101+i). C0/SP = H101 only; C1 hyster = H102 — never SP.
+// LCD token order MUST be "C{i} {name} H{addr}" (Milan: "C0 SP H101").
 static const char *const kCNames[UI_C_COUNT] = {
     "SP",          // C0 heating setpoint → H101 ONLY (FC16 ±)
     "hyster",      // C1 @ H102 (NOT SP — do not ± this)
@@ -66,7 +67,7 @@ static const char *const kCNames[UI_C_COUNT] = {
     "TmaxH",       // C4
     "TminH",       // C5
     "dTstopH",     // C6
-    "SPcool",      // C7 cooling setpoint (read-only here)
+    "coolSet",     // C7 cooling setpoint (read-only; NOT "SP")
     "dTrstC",      // C8
     "dTstopC",     // C9
     "TmaxC",       // C10
@@ -74,6 +75,7 @@ static const char *const kCNames[UI_C_COUNT] = {
 };
 // C2 is 0/1 flag; others shown as integer (mostly °C).
 static bool isFlagC(int i) { return i == 2; }
+static bool s_uiLabelProofPrinted = false;
 
 lv_obj_t *s_lblTitle = nullptr;
 lv_obj_t *s_lblD[UI_D_COUNT] = {};
@@ -276,22 +278,31 @@ void fmtCValue(char *buf, size_t cap, int idx, uint16_t raw, bool have) {
     snprintf(buf, cap, "C? —");
     return;
   }
-  // Always show holding: C0=H101 … C11=H112 (aligned with Milan STOP).
+  // Visible map: "C0 SP H101" / "C1 hyster H102" … (name BEFORE holding).
+  // Holding address is always UI_C_HOLDING(idx) = 101+idx — never offset by Start.
   const unsigned h = (unsigned)UI_C_HOLDING(idx);
   if (!have) {
     if (isFlagC(idx)) {
-      snprintf(buf, cap, "C%d H%u %-7s —", idx, h, kCNames[idx]);
+      snprintf(buf, cap, "C%d %s H%u —", idx, kCNames[idx], h);
     } else {
-      snprintf(buf, cap, "C%d H%u %-7s — C", idx, h, kCNames[idx]);
+      snprintf(buf, cap, "C%d %s H%u — C", idx, kCNames[idx], h);
     }
     return;
   }
   if (isFlagC(idx)) {
-    snprintf(buf, cap, "C%d H%u %-7s %s", idx, h, kCNames[idx],
-             raw ? "1" : "0");
+    snprintf(buf, cap, "C%d %s H%u %s", idx, kCNames[idx], h, raw ? "1" : "0");
   } else {
-    snprintf(buf, cap, "C%d H%u %-7s %u C", idx, h, kCNames[idx],
-             (unsigned)raw);
+    snprintf(buf, cap, "C%d %s H%u %u C", idx, kCNames[idx], h, (unsigned)raw);
+  }
+}
+
+/** SP widget: always "C0 SP H101 …" — value from C0/cRaw[0] only (never C1). */
+void fmtSpLabel(char *buf, size_t cap, uint16_t raw, bool have) {
+  const unsigned h = (unsigned)UI_SP_HOLDING;  // hard 101
+  if (have) {
+    snprintf(buf, cap, "C0 SP H%u %u C (±FC16)", h, (unsigned)raw);
+  } else {
+    snprintf(buf, cap, "C0 SP H%u — C (±FC16)", h);
   }
 }
 
@@ -334,7 +345,7 @@ void buildScreen() {
 
   s_lblTitle = lv_label_create(scr);
   lv_label_set_text(s_lblTitle,
-                    "Spawer — C0=SP=H101 | C1=H102… | D0/D2/D3×.1 D1 int | H100 Start");
+                    "Spawer — C0 SP H101 | C1 hyster H102 | H100 Start");
   lv_obj_set_style_text_color(s_lblTitle, lv_color_hex(0xE8EEF7), 0);
   lv_obj_set_style_text_font(s_lblTitle, &lv_font_montserrat_16, 0);
   lv_obj_align(s_lblTitle, LV_ALIGN_TOP_MID, 0, 4);
@@ -361,7 +372,7 @@ void buildScreen() {
     lv_obj_set_width(s_lblD[i], 460);
   }
 
-  // Compact 3×4 C0..C11 with Haddr (C0=H101=SP, C1=H102…); int °C / flags.
+  // Compact 3×4 C0..C11 — labels "C0 SP H101", "C1 hyster H102", …
   const int32_t cTop = gridTop + 5 * rowH + 4;
   const int32_t cRowH = 20;
   const int32_t cColW = 330;
@@ -375,7 +386,9 @@ void buildScreen() {
     fmtCValue(init, sizeof(init), i, 0, false);
     lv_label_set_text(s_lblC[i], init);
     strncpy(s_txtC[i], init, sizeof(s_txtC[i]) - 1);
-    lv_obj_set_style_text_color(s_lblC[i], lv_color_hex(0x9EC5E8), 0);
+    // C0 SP H101 highlighted — same orange as SP widget (not C1).
+    lv_obj_set_style_text_color(
+        s_lblC[i], lv_color_hex(i == 0 ? 0xF4A261 : 0x9EC5E8), 0);
     lv_obj_set_style_text_font(s_lblC[i], &lv_font_montserrat_14, 0);
     lv_obj_align(s_lblC[i], LV_ALIGN_TOP_LEFT, x, y);
     lv_obj_set_width(s_lblC[i], cColW - 8);
@@ -384,8 +397,12 @@ void buildScreen() {
   // SP ± = FC16 C0/H101 only (never C1/H102). Integer °C (manual C0 15–40).
   const int32_t spY = cTop + 4 * cRowH + 6;
   s_lblSp = lv_label_create(scr);
-  lv_label_set_text(s_lblSp, "SP=C0 H101  — C  (± FC16)");
-  strncpy(s_txtSp, "SP=C0 H101  — C  (± FC16)", sizeof(s_txtSp) - 1);
+  {
+    char spInit[64];
+    fmtSpLabel(spInit, sizeof(spInit), 0, false);
+    lv_label_set_text(s_lblSp, spInit);
+    strncpy(s_txtSp, spInit, sizeof(s_txtSp) - 1);
+  }
   lv_obj_set_style_text_color(s_lblSp, lv_color_hex(0xF4A261), 0);
   lv_obj_set_style_text_font(s_lblSp, &lv_font_montserrat_22, 0);
   lv_obj_align(s_lblSp, LV_ALIGN_TOP_LEFT, 28, spY);
@@ -443,7 +460,7 @@ void buildScreen() {
 
   s_lblStatus = lv_label_create(scr);
   const char *st0 =
-      "SP±=FC16 C0/H101 only | C1=H102 hyster | D0/D2/D3×.1 D1=int | START=H100";
+      "C0 SP H101 ±FC16 | C1 hyster H102 | D0/D2/D3×.1 D1=int | START=H100";
   lv_label_set_text(s_lblStatus, st0);
   strncpy(s_txtStatus, st0, sizeof(s_txtStatus) - 1);
   lv_obj_set_style_text_color(s_lblStatus, lv_color_hex(0x8A93A3), 0);
@@ -528,8 +545,13 @@ bool uiTestInit(void) {
   s_touchArmed = true;
 
   s_ok = true;
-  Serial.printf("[UI] OK %dx%d touch=%s (D + C0=H101=SP ± FC16 + C1=H102… + H100)\n",
-                BOARD_PANEL_W, BOARD_PANEL_H, s_touch ? "GT911" : "none");
+  Serial.printf(
+      "[UI] OK %dx%d touch=%s (labels C0 SP H101 | C1 hyster H102 | SP±=cRaw[0])\n",
+      BOARD_PANEL_W, BOARD_PANEL_H, s_touch ? "GT911" : "none");
+  // Compile-time + boot proof of label map (no Modbus yet).
+  Serial.printf("[UI-LABEL] static C0 SP H%u | C1 %s H%u | SP bind=cRaw[0]\n",
+                (unsigned)UI_C_HOLDING(0), kCNames[1],
+                (unsigned)UI_C_HOLDING(1));
   return true;
 }
 
@@ -550,7 +572,6 @@ void uiTestUpdate(const UiTestSnap *snap) {
   s_last.status = nullptr;
 
   char buf[64];
-  char t[16];
 
   for (int i = 0; i < UI_D_COUNT; i++) {
     fmtDValue(buf, sizeof(buf), i, snap->dRaw[i], snap->haveD[i]);
@@ -562,18 +583,28 @@ void uiTestUpdate(const UiTestSnap *snap) {
     setLabelIfChanged(s_lblC[i], s_txtC[i], sizeof(s_txtC[i]), buf);
   }
 
-  // SP = C0 @ H101 only: integer °C — never ×0.1; never write H102 from ±.
+  // SP widget MUST bind to C0/cRaw[0] @ H101 — never cRaw[1]/H102, never spAddr drift.
   {
-    const unsigned spH =
-        (unsigned)(snap->spAddr ? snap->spAddr : UI_SP_HOLDING);
-    if (snap->haveSp) {
-      fmtIntC(t, sizeof(t), snap->spRaw);
-      snprintf(buf, sizeof(buf), "SP=C0 H%u  %s C  (± FC16)", spH, t);
-    } else {
-      snprintf(buf, sizeof(buf), "SP=C0 H%u  — C  (± FC16)", spH);
-    }
+    const bool haveC0 = (UI_C_COUNT > 0) && snap->haveC[0];
+    const uint16_t c0Raw = haveC0 ? snap->cRaw[0] : snap->spRaw;
+    const bool haveSpVal = haveC0 || snap->haveSp;
+    fmtSpLabel(buf, sizeof(buf), c0Raw, haveSpVal);
   }
   setLabelIfChanged(s_lblSp, s_txtSp, sizeof(s_txtSp), buf);
+
+  // One-shot Serial proof of exact LCD strings + binding (C0↔SP↔H101).
+  if (!s_uiLabelProofPrinted && UI_C_COUNT > 0 && snap->haveC[0]) {
+    s_uiLabelProofPrinted = true;
+    Serial.printf("[UI-LABEL] C0=\"%s\" bind=cRaw[0] H%u raw=%u\n", s_txtC[0],
+                  (unsigned)UI_C_HOLDING(0), (unsigned)snap->cRaw[0]);
+    if (UI_C_COUNT > 1) {
+      Serial.printf("[UI-LABEL] C1=\"%s\" bind=cRaw[1] H%u raw=%u\n", s_txtC[1],
+                    (unsigned)UI_C_HOLDING(1), (unsigned)snap->cRaw[1]);
+    }
+    Serial.printf("[UI-LABEL] SP=\"%s\" bind=cRaw[0] H%u (never C1)\n", s_txtSp,
+                  (unsigned)UI_SP_HOLDING);
+    Serial.printf("[UI-LABEL] expect C0 SP H101 | C1 hyster H102 | SP==C0 raw\n");
+  }
 
   if (snap->haveH100) {
     snprintf(buf, sizeof(buf), "H100 Start/Stop  %u", (unsigned)snap->h100);

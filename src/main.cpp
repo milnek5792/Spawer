@@ -3075,19 +3075,20 @@ void setup() {
   }
 
   Serial.println();
-  Serial.println(F("=== Spawer RS485 + LCD (SP=C0=H101 ± FC16; C1=H102; H100 Start) ==="));
-  // Distinctive PR#14 proof — old flashes lack this line.
-  Serial.println(F("FW: a32941c PR14 absorb C[i]=vals[1+i] (C0=H101=SP)"));
+  Serial.println(F("=== Spawer RS485 + LCD (C0 SP H101 ± FC16; C1 hyster H102; H100 Start) ==="));
+  // Distinctive label-map proof — LCD must show "C0 SP H101" / "C1 hyster H102".
+  Serial.println(F("FW: force-c0-h101-labels — LCD C0 SP H101 | C1 hyster H102 | SP=cRaw[0]"));
   Serial.println(F("D scale: manual no tenths stated; wire D0/D2/D3 x0.1 live, D1 int Milan"));
   Serial.printf("Board: Waveshare ESP32-S3-Touch-LCD-7B (USB CDC)\n");
   Serial.printf("Bus UART: RX=GPIO%d TX=GPIO%d (auto DE/RE) @ %lu 8N1\n",
                 RS485_RX_PIN, RS485_TX_PIN, (unsigned long)busBaud);
   Serial.printf(
-      "D0=H%u..D9 (D1 int) | C0/SP=H%u | C1=H102 | Start=H%u KEEP\n",
+      "D0=H%u..D9 (D1 int) | C0 SP H%u | C1 hyster H102 | Start=H%u KEEP\n",
       (unsigned)MB_D0_AMBIENT_ADDR, (unsigned)MB_SP_ADDR,
       (unsigned)MB_H100_START_ADDR);
   Serial.println(F("Quiet: D=/C=/SP=/H100= + H13 bits= + SP_SET / H100_START"));
   Serial.println(F("FC16 H100 Start/Stop KEEP + FC16 H101 C0/SP int; H102≠SP."));
+  Serial.println(F("LCD labels: C0 SP H101 | C1 hyster H102 | SP widget=cRaw[0] only."));
   Serial.println(F("SCANFC = Serial-only. H13=64 bits=6 ≈ panel err 6."));
   Serial.println(F("BOOT 7B = download. TO → A<->B. REFLASH: pio run -t upload."));
   printHelp();
