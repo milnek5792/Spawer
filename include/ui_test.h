@@ -26,6 +26,13 @@ extern "C" {
 /** Holding for C0 / SP (same as UI_C_HOLDING(0)). */
 #define UI_SP_HOLDING UI_C_HOLDING_BASE
 
+#if UI_C_HOLDING_BASE != 101
+#error "UI_C_HOLDING_BASE must be 101 (C0 SP H101)"
+#endif
+#if UI_SP_HOLDING != 101
+#error "UI_SP_HOLDING must be 101"
+#endif
+
 /** Snapshot for flicker-free label refresh (main → UI). */
 typedef struct UiTestSnap {
   /** D0..D9 raw holdings (manual table from address 0). */
