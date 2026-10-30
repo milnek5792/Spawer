@@ -1,4 +1,4 @@
-// ui_test.h — Spawer op-test LVGL UI (IN/OUT + SP ±0.5 + H13 + START/STOP)
+// ui_test.h — Spawer op-test LVGL UI (D0–D3 + SP H101 ±0.5 + H13 + START/STOP)
 #pragma once
 
 #include <stdint.h>
@@ -10,15 +10,23 @@ extern "C" {
 
 /** Snapshot for flicker-free label refresh (main → UI). */
 typedef struct UiTestSnap {
-  /** Outlet water (candidate holding — default H1). */
+  /** D0 Okolní teplota (holding 0). */
+  uint16_t ambientRaw;
+  uint16_t ambientAddr;
+  bool haveAmbient;
+  /** D2 Výstupní teplota vody (holding 2). */
   uint16_t outletRaw;
   uint16_t outletAddr;
   bool haveOutlet;
-  /** Inlet water (candidate holding — default H2). */
+  /** D1 Teplota vstupní vody (holding 1). */
   uint16_t inletRaw;
   uint16_t inletAddr;
   bool haveInlet;
-  /** Setpoint (writable candidate — default H0). */
+  /** D3 Teplota cívky (holding 3). */
+  uint16_t coilRaw;
+  uint16_t coilAddr;
+  bool haveCoil;
+  /** Setpoint (holding 101; FC16 writable). */
   uint16_t spRaw;
   uint16_t spAddr;
   bool haveSp;

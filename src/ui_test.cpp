@@ -1,4 +1,4 @@
-// ui_test.cpp — Spawer op-test: IN/OUT + SP ±0.5 + H100/H101/H13 + START/STOP
+// ui_test.cpp — Spawer op-test: D0–D3 + SP H101 ±0.5 + H100/H13 + START/STOP
 #include "ui_test.h"
 
 #include "board_7b.h"
@@ -35,11 +35,12 @@ int16_t s_touchLastX = 0;
 int16_t s_touchLastY = 0;
 
 lv_obj_t *s_lblTitle = nullptr;
-lv_obj_t *s_lblOut = nullptr;
-lv_obj_t *s_lblIn = nullptr;
-lv_obj_t *s_lblSp = nullptr;
+lv_obj_t *s_lblOut = nullptr;   // D2 Výstup
+lv_obj_t *s_lblIn = nullptr;    // D1 Vstup
+lv_obj_t *s_lblAmb = nullptr;   // D0 Okolní
+lv_obj_t *s_lblCoil = nullptr;  // D3 Cívka
+lv_obj_t *s_lblSp = nullptr;    // SP H101
 lv_obj_t *s_lblH100 = nullptr;
-lv_obj_t *s_lblH101 = nullptr;
 lv_obj_t *s_lblH13 = nullptr;
 lv_obj_t *s_lblStatus = nullptr;
 lv_obj_t *s_btnStart = nullptr;
@@ -60,9 +61,10 @@ UiTestSnap s_last = {};
 
 char s_txtOut[64] = "";
 char s_txtIn[64] = "";
+char s_txtAmb[64] = "";
+char s_txtCoil[64] = "";
 char s_txtSp[64] = "";
 char s_txtH100[32] = "";
-char s_txtH101[32] = "";
 char s_txtH13[72] = "";
 char s_txtStatus[96] = "";
 int s_btnColorState = -1;  // -1 unknown, 0 stopped(green START), 1 running(amber)
@@ -224,55 +226,66 @@ void buildScreen() {
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
   s_lblTitle = lv_label_create(scr);
-  lv_label_set_text(s_lblTitle, "Spawer — IN / OUT / SP + START/STOP");
+  lv_label_set_text(s_lblTitle, "Spawer — D1/D2/SP + START/STOP");
   lv_obj_set_style_text_color(s_lblTitle, lv_color_hex(0xE8EEF7), 0);
   lv_obj_set_style_text_font(s_lblTitle, &lv_font_montserrat_28, 0);
   lv_obj_align(s_lblTitle, LV_ALIGN_TOP_MID, 0, 10);
 
+  // Manual D2 = holding 2 (výstupní voda)
   s_lblOut = lv_label_create(scr);
-  lv_label_set_text(s_lblOut, "OUT H1  —.- °C");
-  strncpy(s_txtOut, "OUT H1  —.- °C", sizeof(s_txtOut) - 1);
+  lv_label_set_text(s_lblOut, "D2 Vystup  —.- °C");
+  strncpy(s_txtOut, "D2 Vystup  —.- °C", sizeof(s_txtOut) - 1);
   lv_obj_set_style_text_color(s_lblOut, lv_color_hex(0x7FDBCA), 0);
-  lv_obj_set_style_text_font(s_lblOut, &lv_font_montserrat_32, 0);
+  lv_obj_set_style_text_font(s_lblOut, &lv_font_montserrat_28, 0);
   lv_obj_align(s_lblOut, LV_ALIGN_TOP_LEFT, 40, 52);
 
+  // Manual D1 = holding 1 (vstupní voda)
   s_lblIn = lv_label_create(scr);
-  lv_label_set_text(s_lblIn, "IN  H2  —.- °C");
-  strncpy(s_txtIn, "IN  H2  —.- °C", sizeof(s_txtIn) - 1);
+  lv_label_set_text(s_lblIn, "D1 Vstup  —.- °C");
+  strncpy(s_txtIn, "D1 Vstup  —.- °C", sizeof(s_txtIn) - 1);
   lv_obj_set_style_text_color(s_lblIn, lv_color_hex(0x7EB6FF), 0);
-  lv_obj_set_style_text_font(s_lblIn, &lv_font_montserrat_32, 0);
+  lv_obj_set_style_text_font(s_lblIn, &lv_font_montserrat_28, 0);
   lv_obj_align(s_lblIn, LV_ALIGN_TOP_LEFT, 520, 52);
 
+  // SP = holding 101 (not table D)
   s_lblSp = lv_label_create(scr);
-  lv_label_set_text(s_lblSp, "SP  H0  —.- °C");
-  strncpy(s_txtSp, "SP  H0  —.- °C", sizeof(s_txtSp) - 1);
+  lv_label_set_text(s_lblSp, "SP H101  —.- °C");
+  strncpy(s_txtSp, "SP H101  —.- °C", sizeof(s_txtSp) - 1);
   lv_obj_set_style_text_color(s_lblSp, lv_color_hex(0xF4A261), 0);
-  lv_obj_set_style_text_font(s_lblSp, &lv_font_montserrat_32, 0);
-  lv_obj_align(s_lblSp, LV_ALIGN_TOP_LEFT, 40, 108);
+  lv_obj_set_style_text_font(s_lblSp, &lv_font_montserrat_28, 0);
+  lv_obj_align(s_lblSp, LV_ALIGN_TOP_LEFT, 40, 100);
 
-  s_btnSpDown = makeSpButton(scr, "−", LV_ALIGN_TOP_LEFT, 420, 98, onSpDownClicked);
-  s_btnSpUp = makeSpButton(scr, "+", LV_ALIGN_TOP_LEFT, 540, 98, onSpUpClicked);
+  s_btnSpDown = makeSpButton(scr, "−", LV_ALIGN_TOP_LEFT, 420, 90, onSpDownClicked);
+  s_btnSpUp = makeSpButton(scr, "+", LV_ALIGN_TOP_LEFT, 540, 90, onSpUpClicked);
+
+  // D0 Okolní / D3 Cívka
+  s_lblAmb = lv_label_create(scr);
+  lv_label_set_text(s_lblAmb, "D0 Okolni  —.- °C");
+  strncpy(s_txtAmb, "D0 Okolni  —.- °C", sizeof(s_txtAmb) - 1);
+  lv_obj_set_style_text_color(s_lblAmb, lv_color_hex(0xA5B4C8), 0);
+  lv_obj_set_style_text_font(s_lblAmb, &lv_font_montserrat_22, 0);
+  lv_obj_align(s_lblAmb, LV_ALIGN_TOP_LEFT, 40, 160);
+
+  s_lblCoil = lv_label_create(scr);
+  lv_label_set_text(s_lblCoil, "D3 Civka  —.- °C");
+  strncpy(s_txtCoil, "D3 Civka  —.- °C", sizeof(s_txtCoil) - 1);
+  lv_obj_set_style_text_color(s_lblCoil, lv_color_hex(0xA5B4C8), 0);
+  lv_obj_set_style_text_font(s_lblCoil, &lv_font_montserrat_22, 0);
+  lv_obj_align(s_lblCoil, LV_ALIGN_TOP_LEFT, 520, 160);
 
   s_lblH100 = lv_label_create(scr);
-  lv_label_set_text(s_lblH100, "H100  —");
-  strncpy(s_txtH100, "H100  —", sizeof(s_txtH100) - 1);
+  lv_label_set_text(s_lblH100, "H100 Start/Stop  —");
+  strncpy(s_txtH100, "H100 Start/Stop  —", sizeof(s_txtH100) - 1);
   lv_obj_set_style_text_color(s_lblH100, lv_color_hex(0xFFD166), 0);
-  lv_obj_set_style_text_font(s_lblH100, &lv_font_montserrat_28, 0);
-  lv_obj_align(s_lblH100, LV_ALIGN_TOP_LEFT, 40, 178);
-
-  s_lblH101 = lv_label_create(scr);
-  lv_label_set_text(s_lblH101, "H101  —");
-  strncpy(s_txtH101, "H101  —", sizeof(s_txtH101) - 1);
-  lv_obj_set_style_text_color(s_lblH101, lv_color_hex(0xA5B4C8), 0);
-  lv_obj_set_style_text_font(s_lblH101, &lv_font_montserrat_24, 0);
-  lv_obj_align(s_lblH101, LV_ALIGN_TOP_LEFT, 280, 182);
+  lv_obj_set_style_text_font(s_lblH100, &lv_font_montserrat_24, 0);
+  lv_obj_align(s_lblH100, LV_ALIGN_TOP_LEFT, 40, 198);
 
   s_lblH13 = lv_label_create(scr);
   lv_label_set_text(s_lblH13, "H13  —");
   strncpy(s_txtH13, "H13  —", sizeof(s_txtH13) - 1);
   lv_obj_set_style_text_color(s_lblH13, lv_color_hex(0xFF6B6B), 0);
   lv_obj_set_style_text_font(s_lblH13, &lv_font_montserrat_18, 0);
-  lv_obj_align(s_lblH13, LV_ALIGN_TOP_LEFT, 40, 220);
+  lv_obj_align(s_lblH13, LV_ALIGN_TOP_LEFT, 40, 236);
   lv_obj_set_width(s_lblH13, BOARD_PANEL_W - 80);
 
   s_btnStart = lv_button_create(scr);
@@ -310,7 +323,7 @@ void buildScreen() {
 
   s_lblStatus = lv_label_create(scr);
   const char *st0 =
-      "OUT/IN remap in main.cpp  |  SP ±FC16 ±0.5  |  START/STOP=FC16 H100";
+      "Manual D0..=H0..  |  SP=FC16 H101 +/-0.5  |  START/STOP=FC16 H100";
   lv_label_set_text(s_lblStatus, st0);
   strncpy(s_txtStatus, st0, sizeof(s_txtStatus) - 1);
   lv_obj_set_style_text_color(s_lblStatus, lv_color_hex(0x8A93A3), 0);
@@ -395,7 +408,7 @@ bool uiTestInit(void) {
   s_touchArmed = true;
 
   s_ok = true;
-  Serial.printf("[UI] OK %dx%d touch=%s (IN/OUT/SP ±0.5 + START/STOP)\n",
+  Serial.printf("[UI] OK %dx%d touch=%s (D0-D3 + SP H101 ±0.5 + START/STOP)\n",
                 BOARD_PANEL_W, BOARD_PANEL_H, s_touch ? "GT911" : "none");
   return true;
 }
@@ -421,44 +434,51 @@ void uiTestUpdate(const UiTestSnap *snap) {
 
   if (snap->haveOutlet) {
     fmtTempC(t, sizeof(t), snap->outletRaw);
-    snprintf(buf, sizeof(buf), "OUT H%u  %s °C", (unsigned)snap->outletAddr, t);
+    snprintf(buf, sizeof(buf), "D2 Vystup  %s °C", t);
   } else {
-    snprintf(buf, sizeof(buf), "OUT H%u  —.- °C",
-             (unsigned)(snap->outletAddr ? snap->outletAddr : 1));
+    snprintf(buf, sizeof(buf), "D2 Vystup  —.- °C");
   }
   setLabelIfChanged(s_lblOut, s_txtOut, sizeof(s_txtOut), buf);
 
   if (snap->haveInlet) {
     fmtTempC(t, sizeof(t), snap->inletRaw);
-    snprintf(buf, sizeof(buf), "IN  H%u  %s °C", (unsigned)snap->inletAddr, t);
+    snprintf(buf, sizeof(buf), "D1 Vstup  %s °C", t);
   } else {
-    snprintf(buf, sizeof(buf), "IN  H%u  —.- °C",
-             (unsigned)(snap->inletAddr ? snap->inletAddr : 2));
+    snprintf(buf, sizeof(buf), "D1 Vstup  —.- °C");
   }
   setLabelIfChanged(s_lblIn, s_txtIn, sizeof(s_txtIn), buf);
 
+  if (snap->haveAmbient) {
+    fmtTempC(t, sizeof(t), snap->ambientRaw);
+    snprintf(buf, sizeof(buf), "D0 Okolni  %s °C", t);
+  } else {
+    snprintf(buf, sizeof(buf), "D0 Okolni  —.- °C");
+  }
+  setLabelIfChanged(s_lblAmb, s_txtAmb, sizeof(s_txtAmb), buf);
+
+  if (snap->haveCoil) {
+    fmtTempC(t, sizeof(t), snap->coilRaw);
+    snprintf(buf, sizeof(buf), "D3 Civka  %s °C", t);
+  } else {
+    snprintf(buf, sizeof(buf), "D3 Civka  —.- °C");
+  }
+  setLabelIfChanged(s_lblCoil, s_txtCoil, sizeof(s_txtCoil), buf);
+
   if (snap->haveSp) {
     fmtTempC(t, sizeof(t), snap->spRaw);
-    snprintf(buf, sizeof(buf), "SP  H%u  %s °C", (unsigned)snap->spAddr, t);
+    snprintf(buf, sizeof(buf), "SP H%u  %s °C", (unsigned)snap->spAddr, t);
   } else {
-    snprintf(buf, sizeof(buf), "SP  H%u  —.- °C",
-             (unsigned)(snap->spAddr ? snap->spAddr : 0));
+    snprintf(buf, sizeof(buf), "SP H%u  —.- °C",
+             (unsigned)(snap->spAddr ? snap->spAddr : 101));
   }
   setLabelIfChanged(s_lblSp, s_txtSp, sizeof(s_txtSp), buf);
 
   if (snap->haveH100) {
-    snprintf(buf, sizeof(buf), "H100  %u", (unsigned)snap->h100);
+    snprintf(buf, sizeof(buf), "H100 Start/Stop  %u", (unsigned)snap->h100);
   } else {
-    snprintf(buf, sizeof(buf), "H100  —");
+    snprintf(buf, sizeof(buf), "H100 Start/Stop  —");
   }
   setLabelIfChanged(s_lblH100, s_txtH100, sizeof(s_txtH100), buf);
-
-  if (snap->haveH101) {
-    snprintf(buf, sizeof(buf), "H101  %u", (unsigned)snap->h101);
-  } else {
-    snprintf(buf, sizeof(buf), "H101  —");
-  }
-  setLabelIfChanged(s_lblH101, s_txtH101, sizeof(s_txtH101), buf);
 
   if (snap->haveH13) {
     char bits[40];
@@ -508,13 +528,19 @@ void uiTestUpdateBasic(uint16_t h1, bool haveH1, uint16_t h100, bool haveH100,
                        uint16_t h101, bool haveH101, uint16_t h13, bool haveH13,
                        const char *status) {
   UiTestSnap s = s_last;
-  s.outletRaw = h1;
-  s.haveOutlet = haveH1;
-  if (s.outletAddr == 0) s.outletAddr = 1;
+  // Compat: h1 historically meant water temp — map to D1 vstup (holding 1).
+  s.inletRaw = h1;
+  s.haveInlet = haveH1;
+  if (s.inletAddr == 0) s.inletAddr = 1;
   s.h100 = h100;
   s.haveH100 = haveH100;
   s.h101 = h101;
   s.haveH101 = haveH101;
+  if (haveH101) {
+    s.spRaw = h101;
+    s.haveSp = true;
+    if (s.spAddr == 0) s.spAddr = 101;
+  }
   s.h13 = h13;
   s.haveH13 = haveH13;
   s.status = status;
