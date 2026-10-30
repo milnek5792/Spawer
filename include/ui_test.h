@@ -1,4 +1,4 @@
-// ui_test.h — Spawer op-test LVGL UI (D0–D9 + C0–C11 + SP H99 int °C + H100 Start + H13)
+// ui_test.h — Spawer op-test LVGL UI (D0–D9 + C0–C11 + SP H101 int °C + H100 Start + H13)
 #pragma once
 
 #include <stdint.h>
@@ -13,8 +13,9 @@ extern "C" {
 
 /**
  * Manual table C subset shown on LCD (C0..C11).
- * Holding map (project): C0/SP @ H99, Start/Stop @ H100 (KEEP),
- * C1 hysteresis @ H101, C2..C11 @ H102..H111.
+ * Holding map (Milan STOP): H100 = Start/Stop (KEEP);
+ * C table starts at H101 → C0/SP @ H101, C1 @ H102, … C11 @ H112.
+ * Do NOT treat H102 as SP.
  */
 #define UI_C_COUNT 12
 
@@ -26,14 +27,14 @@ typedef struct UiTestSnap {
   /** C0..C11 raw holdings (integer °C / 0-1 flags per manual C). */
   uint16_t cRaw[UI_C_COUNT];
   bool haveC[UI_C_COUNT];
-  /** Setpoint = C0 = holding 99; integer °C (manual C0), FC16 writable. */
+  /** Setpoint = C0 = holding 101; integer °C (manual C0), FC16 writable. */
   uint16_t spRaw;
   uint16_t spAddr;
   bool haveSp;
   /** Start/Stop holding 100 (FC16); keep — do not relocate. */
   uint16_t h100;
   bool haveH100;
-  /** H101 = C1 hysteresis (NOT setpoint). */
+  /** H101 = C0/SP (same as spRaw when mapped). */
   uint16_t h101;
   bool haveH101;
   /** Holding 13 status/bits (DIFFAULT: H13=64 → bit6 ≈ panel error 6). */
