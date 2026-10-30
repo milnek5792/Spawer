@@ -1,4 +1,4 @@
-// ui_test.cpp — Spawer op-test: D0–D3 + SP H101 ±0.5 + H100/H13 + START/STOP
+// ui_test.cpp — Spawer op-test: D0–D9 + C0–C11 (label "C0 SP H101") + H100 Start + H13
 #include "ui_test.h"
 
 #include "board_7b.h"
@@ -34,12 +34,53 @@ bool s_touchArmed = false;
 int16_t s_touchLastX = 0;
 int16_t s_touchLastY = 0;
 
+// Manual D0–D9 short ASCII names (Montserrat has no Czech diacritics).
+static const char *const kDNames[UI_D_COUNT] = {
+    "Okolni",      // D0
+    "Vstup",       // D1
+    "Vystup",      // D2
+    "Civka",       // D3
+    "Kompresor",   // D4
+    "Ventilator",  // D5
+    "4cestny",     // D6
+    "HiTlak",      // D7
+    "LoTlak",      // D8
+    "Prutok",      // D9
+};
+
+// Manual §4.11 D0–D3: ranges in °C as "Naměřená hodnota" — NO Modbus 0.1/int
+// stated. Wire scale = live Modbus evidence (SP-20): D0/D2/D3 raw×0.1
+// (200≈20.0 °C). D1 inlet = INTEGER °C (Milan: ×0.1 looked nonsense).
+// D4–D9 = status ZAP/VYP. Manual C table uses whole °C (not tenths).
+static bool isTempD_x01(int i) { return i == 0 || i == 2 || i == 3; }
+static bool isTempD_int(int i) { return i == 1; }
+static bool isTempD(int i) { return isTempD_x01(i) || isTempD_int(i); }
+
+// Manual C0–C11 short names; values are integer °C or 0/1 (NOT ×0.1).
+// Holding: Ci → H(101+i). C0/SP = H101 only; C1 hyster = H102 — never SP.
+// LCD token order MUST be "C{i} {name} H{addr}" (Milan: "C0 SP H101").
+static const char *const kCNames[UI_C_COUNT] = {
+    "SP",          // C0 heating setpoint → H101 ONLY (FC16 ±)
+    "hyster",      // C1 @ H102 (NOT SP — do not ± this)
+    "AutoRst",     // C2 0/1
+    "Tdisch",      // C3
+    "TmaxH",       // C4
+    "TminH",       // C5
+    "dTstopH",     // C6
+    "coolSet",     // C7 cooling setpoint (read-only; NOT "SP")
+    "dTrstC",      // C8
+    "dTstopC",     // C9
+    "TmaxC",       // C10
+    "TminC",       // C11
+};
+// C2 is 0/1 flag; others shown as integer (mostly °C).
+static bool isFlagC(int i) { return i == 2; }
+static bool s_uiLabelProofPrinted = false;
+
 lv_obj_t *s_lblTitle = nullptr;
-lv_obj_t *s_lblOut = nullptr;   // D2 Výstup
-lv_obj_t *s_lblIn = nullptr;    // D1 Vstup
-lv_obj_t *s_lblAmb = nullptr;   // D0 Okolní
-lv_obj_t *s_lblCoil = nullptr;  // D3 Cívka
-lv_obj_t *s_lblSp = nullptr;    // SP H101
+lv_obj_t *s_lblD[UI_D_COUNT] = {};
+lv_obj_t *s_lblC[UI_C_COUNT] = {};
+lv_obj_t *s_lblSp = nullptr;
 lv_obj_t *s_lblH100 = nullptr;
 lv_obj_t *s_lblH13 = nullptr;
 lv_obj_t *s_lblStatus = nullptr;
@@ -59,10 +100,8 @@ static const uint32_t TAP_DEBOUNCE_MS = 450;
 
 UiTestSnap s_last = {};
 
-char s_txtOut[64] = "";
-char s_txtIn[64] = "";
-char s_txtAmb[64] = "";
-char s_txtCoil[64] = "";
+char s_txtD[UI_D_COUNT][48] = {};
+char s_txtC[UI_C_COUNT][40] = {};
 char s_txtSp[64] = "";
 char s_txtH100[32] = "";
 char s_txtH13[72] = "";
@@ -174,7 +213,9 @@ void onSpDownClicked(lv_event_t *e) {
     return;
   }
   s_spDownReq = true;
-  Serial.println(F("SP- tap (UI CLICKED −0.5)"));
+  // ± always C0/H101 — never C1/H102 hyster.
+  Serial.printf("SP- tap (UI CLICKED −1 C, C0/H%u int)\n",
+                (unsigned)UI_SP_HOLDING);
 }
 
 void onSpUpClicked(lv_event_t *e) {
@@ -184,7 +225,8 @@ void onSpUpClicked(lv_event_t *e) {
     return;
   }
   s_spUpReq = true;
-  Serial.println(F("SP+ tap (UI CLICKED +0.5)"));
+  Serial.printf("SP+ tap (UI CLICKED +1 C, C0/H%u int)\n",
+                (unsigned)UI_SP_HOLDING);
 }
 
 void setLabelIfChanged(lv_obj_t *lbl, char *cache, size_t cacheCap, const char *text) {
@@ -195,30 +237,109 @@ void setLabelIfChanged(lv_obj_t *lbl, char *cache, size_t cacheCap, const char *
   lv_label_set_text(lbl, cache);
 }
 
-void fmtTempC(char *buf, size_t cap, uint16_t raw) {
+/** D measured temps: raw×0.1 °C (live H1=200 → 20.0). */
+void fmtTempC_x01(char *buf, size_t cap, uint16_t raw) {
   int whole = (int)raw / 10;
   int frac = (int)raw % 10;
   snprintf(buf, cap, "%d.%d", whole, frac);
 }
 
+/** Manual C / SP: integer °C (raw 2 → "2", never "0.2"). */
+void fmtIntC(char *buf, size_t cap, uint16_t raw) {
+  snprintf(buf, cap, "%u", (unsigned)raw);
+}
+
+void fmtDValue(char *buf, size_t cap, int idx, uint16_t raw, bool have) {
+  // Scale tags: ×0.1 = Modbus tenths (live); int = whole °C (Milan D1).
+  if (!have) {
+    if (isTempD_int(idx)) {
+      snprintf(buf, cap, "D%d %-8s int  — C", idx, kDNames[idx]);
+    } else if (isTempD_x01(idx)) {
+      snprintf(buf, cap, "D%d %-8s ×.1  —.- C", idx, kDNames[idx]);
+    } else {
+      snprintf(buf, cap, "D%d %-8s      —", idx, kDNames[idx]);
+    }
+    return;
+  }
+  if (isTempD_int(idx)) {
+    char t[16];
+    fmtIntC(t, sizeof(t), raw);
+    snprintf(buf, cap, "D%d %-8s int  %s C", idx, kDNames[idx], t);
+  } else if (isTempD_x01(idx)) {
+    char t[16];
+    fmtTempC_x01(t, sizeof(t), raw);
+    snprintf(buf, cap, "D%d %-8s ×.1  %s C", idx, kDNames[idx], t);
+  } else if (raw <= 1) {
+    snprintf(buf, cap, "D%d %-8s      %s", idx, kDNames[idx], raw ? "ZAP" : "VYP");
+  } else {
+    snprintf(buf, cap, "D%d %-8s      %u", idx, kDNames[idx], (unsigned)raw);
+  }
+}
+
+void fmtCValue(char *buf, size_t cap, int idx, uint16_t raw, bool have) {
+  if (idx < 0 || idx >= UI_C_COUNT) {
+    snprintf(buf, cap, "C? —");
+    return;
+  }
+  // Visible map: "C0 SP H101" / "C1 hyster H102" … (name BEFORE holding).
+  // Holding address is always UI_C_HOLDING(idx) = 101+idx — never offset by Start.
+  const unsigned h = (unsigned)UI_C_HOLDING(idx);
+  if (!have) {
+    if (isFlagC(idx)) {
+      snprintf(buf, cap, "C%d %s H%u —", idx, kCNames[idx], h);
+    } else {
+      snprintf(buf, cap, "C%d %s H%u — C", idx, kCNames[idx], h);
+    }
+    return;
+  }
+  if (isFlagC(idx)) {
+    snprintf(buf, cap, "C%d %s H%u %s", idx, kCNames[idx], h, raw ? "1" : "0");
+  } else {
+    snprintf(buf, cap, "C%d %s H%u %u C", idx, kCNames[idx], h, (unsigned)raw);
+  }
+}
+
+/** SP widget: always "C0 SP H101 …" — value from C0/cRaw[0] only (never C1). */
+void fmtSpLabel(char *buf, size_t cap, uint16_t raw, bool have) {
+  const unsigned h = (unsigned)UI_SP_HOLDING;  // hard 101
+  if (have) {
+    snprintf(buf, cap, "C0 SP H%u %u C (±FC16)", h, (unsigned)raw);
+  } else {
+    snprintf(buf, cap, "C0 SP H%u — C (±FC16)", h);
+  }
+}
+
 lv_obj_t *makeSpButton(lv_obj_t *scr, const char *txt, lv_align_t align, int32_t x,
                        int32_t y, lv_event_cb_t cb) {
   lv_obj_t *btn = lv_button_create(scr);
-  lv_obj_set_size(btn, 100, 72);
+  lv_obj_set_size(btn, 96, 56);
   lv_obj_align(btn, align, x, y);
   lv_obj_set_style_bg_color(btn, lv_color_hex(0x3A4A5C), 0);
   lv_obj_set_style_bg_color(btn, lv_color_hex(0x2A3542), LV_STATE_PRESSED);
-  lv_obj_set_style_radius(btn, 12, 0);
+  lv_obj_set_style_radius(btn, 10, 0);
   lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
   lv_obj_t *lbl = lv_label_create(btn);
   lv_label_set_text(lbl, txt);
-  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_32, 0);
+  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_28, 0);
   lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
   lv_obj_center(lbl);
   lv_obj_clear_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
   return btn;
 }
+
+static const uint32_t kDColors[UI_D_COUNT] = {
+    0xA5B4C8,  // D0
+    0x7EB6FF,  // D1
+    0x7FDBCA,  // D2
+    0xC5B4E3,  // D3
+    0xF4A261,  // D4
+    0xE9C46A,  // D5
+    0x90BE6D,  // D6
+    0xFF6B6B,  // D7
+    0xFF8E72,  // D8
+    0x4ECDC4,  // D9
+};
 
 void buildScreen() {
   lv_obj_t *scr = lv_screen_active();
@@ -226,109 +347,128 @@ void buildScreen() {
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
   s_lblTitle = lv_label_create(scr);
-  lv_label_set_text(s_lblTitle, "Spawer — D1/D2/SP + START/STOP");
+  lv_label_set_text(s_lblTitle,
+                    "Spawer — C0 SP H101 | C1 hyster H102 | H100 Start");
   lv_obj_set_style_text_color(s_lblTitle, lv_color_hex(0xE8EEF7), 0);
-  lv_obj_set_style_text_font(s_lblTitle, &lv_font_montserrat_28, 0);
-  lv_obj_align(s_lblTitle, LV_ALIGN_TOP_MID, 0, 10);
+  lv_obj_set_style_text_font(s_lblTitle, &lv_font_montserrat_16, 0);
+  lv_obj_align(s_lblTitle, LV_ALIGN_TOP_MID, 0, 4);
 
-  // Manual D2 = holding 2 (výstupní voda)
-  s_lblOut = lv_label_create(scr);
-  lv_label_set_text(s_lblOut, "D2 Vystup  —.- °C");
-  strncpy(s_txtOut, "D2 Vystup  —.- °C", sizeof(s_txtOut) - 1);
-  lv_obj_set_style_text_color(s_lblOut, lv_color_hex(0x7FDBCA), 0);
-  lv_obj_set_style_text_font(s_lblOut, &lv_font_montserrat_28, 0);
-  lv_obj_align(s_lblOut, LV_ALIGN_TOP_LEFT, 40, 52);
+  // Compact 2×5 D0..D9 (D1 int °C; D0/D2/D3 ×0.1).
+  const int32_t gridTop = 26;
+  const int32_t rowH = 22;
+  const int32_t col0X = 28;
+  const int32_t col1X = 520;
+  for (int i = 0; i < UI_D_COUNT; i++) {
+    int row = i / 2;
+    int col = i % 2;
+    int32_t x = (col == 0) ? col0X : col1X;
+    int32_t y = gridTop + row * rowH;
 
-  // Manual D1 = holding 1 (vstupní voda)
-  s_lblIn = lv_label_create(scr);
-  lv_label_set_text(s_lblIn, "D1 Vstup  —.- °C");
-  strncpy(s_txtIn, "D1 Vstup  —.- °C", sizeof(s_txtIn) - 1);
-  lv_obj_set_style_text_color(s_lblIn, lv_color_hex(0x7EB6FF), 0);
-  lv_obj_set_style_text_font(s_lblIn, &lv_font_montserrat_28, 0);
-  lv_obj_align(s_lblIn, LV_ALIGN_TOP_LEFT, 520, 52);
+    s_lblD[i] = lv_label_create(scr);
+    char init[48];
+    fmtDValue(init, sizeof(init), i, 0, false);
+    lv_label_set_text(s_lblD[i], init);
+    strncpy(s_txtD[i], init, sizeof(s_txtD[i]) - 1);
+    lv_obj_set_style_text_color(s_lblD[i], lv_color_hex(kDColors[i]), 0);
+    lv_obj_set_style_text_font(s_lblD[i], &lv_font_montserrat_14, 0);
+    lv_obj_align(s_lblD[i], LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_set_width(s_lblD[i], 460);
+  }
 
-  // SP = holding 101 (not table D)
+  // Compact 3×4 C0..C11 — labels "C0 SP H101", "C1 hyster H102", …
+  const int32_t cTop = gridTop + 5 * rowH + 4;
+  const int32_t cRowH = 20;
+  const int32_t cColW = 330;
+  for (int i = 0; i < UI_C_COUNT; i++) {
+    int row = i / 3;
+    int col = i % 3;
+    int32_t x = 28 + col * cColW;
+    int32_t y = cTop + row * cRowH;
+    s_lblC[i] = lv_label_create(scr);
+    char init[40];
+    fmtCValue(init, sizeof(init), i, 0, false);
+    lv_label_set_text(s_lblC[i], init);
+    strncpy(s_txtC[i], init, sizeof(s_txtC[i]) - 1);
+    // C0 SP H101 highlighted — same orange as SP widget (not C1).
+    lv_obj_set_style_text_color(
+        s_lblC[i], lv_color_hex(i == 0 ? 0xF4A261 : 0x9EC5E8), 0);
+    lv_obj_set_style_text_font(s_lblC[i], &lv_font_montserrat_14, 0);
+    lv_obj_align(s_lblC[i], LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_set_width(s_lblC[i], cColW - 8);
+  }
+
+  // SP ± = FC16 C0/H101 only (never C1/H102). Integer °C (manual C0 15–40).
+  const int32_t spY = cTop + 4 * cRowH + 6;
   s_lblSp = lv_label_create(scr);
-  lv_label_set_text(s_lblSp, "SP H101  —.- °C");
-  strncpy(s_txtSp, "SP H101  —.- °C", sizeof(s_txtSp) - 1);
+  {
+    char spInit[64];
+    fmtSpLabel(spInit, sizeof(spInit), 0, false);
+    lv_label_set_text(s_lblSp, spInit);
+    strncpy(s_txtSp, spInit, sizeof(s_txtSp) - 1);
+  }
   lv_obj_set_style_text_color(s_lblSp, lv_color_hex(0xF4A261), 0);
-  lv_obj_set_style_text_font(s_lblSp, &lv_font_montserrat_28, 0);
-  lv_obj_align(s_lblSp, LV_ALIGN_TOP_LEFT, 40, 100);
+  lv_obj_set_style_text_font(s_lblSp, &lv_font_montserrat_22, 0);
+  lv_obj_align(s_lblSp, LV_ALIGN_TOP_LEFT, 28, spY);
 
-  s_btnSpDown = makeSpButton(scr, "−", LV_ALIGN_TOP_LEFT, 420, 90, onSpDownClicked);
-  s_btnSpUp = makeSpButton(scr, "+", LV_ALIGN_TOP_LEFT, 540, 90, onSpUpClicked);
-
-  // D0 Okolní / D3 Cívka
-  s_lblAmb = lv_label_create(scr);
-  lv_label_set_text(s_lblAmb, "D0 Okolni  —.- °C");
-  strncpy(s_txtAmb, "D0 Okolni  —.- °C", sizeof(s_txtAmb) - 1);
-  lv_obj_set_style_text_color(s_lblAmb, lv_color_hex(0xA5B4C8), 0);
-  lv_obj_set_style_text_font(s_lblAmb, &lv_font_montserrat_22, 0);
-  lv_obj_align(s_lblAmb, LV_ALIGN_TOP_LEFT, 40, 160);
-
-  s_lblCoil = lv_label_create(scr);
-  lv_label_set_text(s_lblCoil, "D3 Civka  —.- °C");
-  strncpy(s_txtCoil, "D3 Civka  —.- °C", sizeof(s_txtCoil) - 1);
-  lv_obj_set_style_text_color(s_lblCoil, lv_color_hex(0xA5B4C8), 0);
-  lv_obj_set_style_text_font(s_lblCoil, &lv_font_montserrat_22, 0);
-  lv_obj_align(s_lblCoil, LV_ALIGN_TOP_LEFT, 520, 160);
+  s_btnSpDown = makeSpButton(scr, "SP-", LV_ALIGN_TOP_LEFT, 360, spY - 8, onSpDownClicked);
+  s_btnSpUp = makeSpButton(scr, "SP+", LV_ALIGN_TOP_LEFT, 470, spY - 8, onSpUpClicked);
 
   s_lblH100 = lv_label_create(scr);
   lv_label_set_text(s_lblH100, "H100 Start/Stop  —");
   strncpy(s_txtH100, "H100 Start/Stop  —", sizeof(s_txtH100) - 1);
   lv_obj_set_style_text_color(s_lblH100, lv_color_hex(0xFFD166), 0);
-  lv_obj_set_style_text_font(s_lblH100, &lv_font_montserrat_24, 0);
-  lv_obj_align(s_lblH100, LV_ALIGN_TOP_LEFT, 40, 198);
+  lv_obj_set_style_text_font(s_lblH100, &lv_font_montserrat_18, 0);
+  lv_obj_align(s_lblH100, LV_ALIGN_TOP_LEFT, 28, spY + 52);
 
   s_lblH13 = lv_label_create(scr);
   lv_label_set_text(s_lblH13, "H13  —");
   strncpy(s_txtH13, "H13  —", sizeof(s_txtH13) - 1);
   lv_obj_set_style_text_color(s_lblH13, lv_color_hex(0xFF6B6B), 0);
-  lv_obj_set_style_text_font(s_lblH13, &lv_font_montserrat_18, 0);
-  lv_obj_align(s_lblH13, LV_ALIGN_TOP_LEFT, 40, 236);
-  lv_obj_set_width(s_lblH13, BOARD_PANEL_W - 80);
+  lv_obj_set_style_text_font(s_lblH13, &lv_font_montserrat_14, 0);
+  lv_obj_align(s_lblH13, LV_ALIGN_TOP_LEFT, 420, spY + 54);
+  lv_obj_set_width(s_lblH13, BOARD_PANEL_W - 450);
 
   s_btnStart = lv_button_create(scr);
-  lv_obj_set_size(s_btnStart, 420, 140);
-  lv_obj_align(s_btnStart, LV_ALIGN_BOTTOM_LEFT, 48, -52);
+  lv_obj_set_size(s_btnStart, 420, 120);
+  lv_obj_align(s_btnStart, LV_ALIGN_BOTTOM_LEFT, 48, -40);
   lv_obj_set_style_bg_color(s_btnStart, lv_color_hex(0x1F8A4C), 0);
   lv_obj_set_style_bg_color(s_btnStart, lv_color_hex(0x146338), LV_STATE_PRESSED);
-  lv_obj_set_style_radius(s_btnStart, 18, 0);
+  lv_obj_set_style_radius(s_btnStart, 16, 0);
   lv_obj_add_flag(s_btnStart, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(s_btnStart, onStartClicked, LV_EVENT_CLICKED, nullptr);
   s_btnColorState = 0;
 
   lv_obj_t *btnStartLbl = lv_label_create(s_btnStart);
   lv_label_set_text(btnStartLbl, "START");
-  lv_obj_set_style_text_font(btnStartLbl, &lv_font_montserrat_48, 0);
+  lv_obj_set_style_text_font(btnStartLbl, &lv_font_montserrat_40, 0);
   lv_obj_set_style_text_color(btnStartLbl, lv_color_hex(0xFFFFFF), 0);
   lv_obj_center(btnStartLbl);
   lv_obj_clear_flag(btnStartLbl, LV_OBJ_FLAG_CLICKABLE);
 
   s_btnStop = lv_button_create(scr);
-  lv_obj_set_size(s_btnStop, 420, 140);
-  lv_obj_align(s_btnStop, LV_ALIGN_BOTTOM_RIGHT, -48, -52);
+  lv_obj_set_size(s_btnStop, 420, 120);
+  lv_obj_align(s_btnStop, LV_ALIGN_BOTTOM_RIGHT, -48, -40);
   lv_obj_set_style_bg_color(s_btnStop, lv_color_hex(0xB33A3A), 0);
   lv_obj_set_style_bg_color(s_btnStop, lv_color_hex(0x7A2424), LV_STATE_PRESSED);
-  lv_obj_set_style_radius(s_btnStop, 18, 0);
+  lv_obj_set_style_radius(s_btnStop, 16, 0);
   lv_obj_add_flag(s_btnStop, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(s_btnStop, onStopClicked, LV_EVENT_CLICKED, nullptr);
 
   lv_obj_t *btnStopLbl = lv_label_create(s_btnStop);
   lv_label_set_text(btnStopLbl, "STOP");
-  lv_obj_set_style_text_font(btnStopLbl, &lv_font_montserrat_48, 0);
+  lv_obj_set_style_text_font(btnStopLbl, &lv_font_montserrat_40, 0);
   lv_obj_set_style_text_color(btnStopLbl, lv_color_hex(0xFFFFFF), 0);
   lv_obj_center(btnStopLbl);
   lv_obj_clear_flag(btnStopLbl, LV_OBJ_FLAG_CLICKABLE);
 
   s_lblStatus = lv_label_create(scr);
   const char *st0 =
-      "Manual D0..=H0..  |  SP=FC16 H101 +/-0.5  |  START/STOP=FC16 H100";
+      "C0 SP H101 ±FC16 | C1 hyster H102 | D0/D2/D3×.1 D1=int | START=H100";
   lv_label_set_text(s_lblStatus, st0);
   strncpy(s_txtStatus, st0, sizeof(s_txtStatus) - 1);
   lv_obj_set_style_text_color(s_lblStatus, lv_color_hex(0x8A93A3), 0);
   lv_obj_set_style_text_font(s_lblStatus, &lv_font_montserrat_14, 0);
-  lv_obj_align(s_lblStatus, LV_ALIGN_BOTTOM_MID, 0, -10);
+  lv_obj_align(s_lblStatus, LV_ALIGN_BOTTOM_MID, 0, -6);
   lv_obj_set_width(s_lblStatus, BOARD_PANEL_W - 80);
   lv_label_set_long_mode(s_lblStatus, LV_LABEL_LONG_WRAP);
 }
@@ -408,8 +548,13 @@ bool uiTestInit(void) {
   s_touchArmed = true;
 
   s_ok = true;
-  Serial.printf("[UI] OK %dx%d touch=%s (D0-D3 + SP H101 ±0.5 + START/STOP)\n",
-                BOARD_PANEL_W, BOARD_PANEL_H, s_touch ? "GT911" : "none");
+  Serial.printf(
+      "[UI] OK %dx%d touch=%s (labels C0 SP H101 | C1 hyster H102 | SP±=cRaw[0])\n",
+      BOARD_PANEL_W, BOARD_PANEL_H, s_touch ? "GT911" : "none");
+  // Compile-time + boot proof of label map (no Modbus yet).
+  Serial.printf("[UI-LABEL] static C0 SP H%u | C1 %s H%u | SP bind=cRaw[0]\n",
+                (unsigned)UI_C_HOLDING(0), kCNames[1],
+                (unsigned)UI_C_HOLDING(1));
   return true;
 }
 
@@ -429,49 +574,60 @@ void uiTestUpdate(const UiTestSnap *snap) {
   s_last = *snap;
   s_last.status = nullptr;
 
-  char buf[96];
-  char t[16];
+  char buf[64];
 
-  if (snap->haveOutlet) {
-    fmtTempC(t, sizeof(t), snap->outletRaw);
-    snprintf(buf, sizeof(buf), "D2 Vystup  %s °C", t);
-  } else {
-    snprintf(buf, sizeof(buf), "D2 Vystup  —.- °C");
+  for (int i = 0; i < UI_D_COUNT; i++) {
+    fmtDValue(buf, sizeof(buf), i, snap->dRaw[i], snap->haveD[i]);
+    setLabelIfChanged(s_lblD[i], s_txtD[i], sizeof(s_txtD[i]), buf);
   }
-  setLabelIfChanged(s_lblOut, s_txtOut, sizeof(s_txtOut), buf);
 
-  if (snap->haveInlet) {
-    fmtTempC(t, sizeof(t), snap->inletRaw);
-    snprintf(buf, sizeof(buf), "D1 Vstup  %s °C", t);
-  } else {
-    snprintf(buf, sizeof(buf), "D1 Vstup  —.- °C");
+  for (int i = 0; i < UI_C_COUNT; i++) {
+    // Label address is ALWAYS UI_C_HOLDING(i)=101+i — value from cRaw[i] only.
+    fmtCValue(buf, sizeof(buf), i, snap->cRaw[i], snap->haveC[i]);
+    setLabelIfChanged(s_lblC[i], s_txtC[i], sizeof(s_txtC[i]), buf);
   }
-  setLabelIfChanged(s_lblIn, s_txtIn, sizeof(s_txtIn), buf);
 
-  if (snap->haveAmbient) {
-    fmtTempC(t, sizeof(t), snap->ambientRaw);
-    snprintf(buf, sizeof(buf), "D0 Okolni  %s °C", t);
-  } else {
-    snprintf(buf, sizeof(buf), "D0 Okolni  —.- °C");
-  }
-  setLabelIfChanged(s_lblAmb, s_txtAmb, sizeof(s_txtAmb), buf);
-
-  if (snap->haveCoil) {
-    fmtTempC(t, sizeof(t), snap->coilRaw);
-    snprintf(buf, sizeof(buf), "D3 Civka  %s °C", t);
-  } else {
-    snprintf(buf, sizeof(buf), "D3 Civka  —.- °C");
-  }
-  setLabelIfChanged(s_lblCoil, s_txtCoil, sizeof(s_txtCoil), buf);
-
-  if (snap->haveSp) {
-    fmtTempC(t, sizeof(t), snap->spRaw);
-    snprintf(buf, sizeof(buf), "SP H%u  %s °C", (unsigned)snap->spAddr, t);
-  } else {
-    snprintf(buf, sizeof(buf), "SP H%u  —.- °C",
-             (unsigned)(snap->spAddr ? snap->spAddr : 101));
+  // SP widget MUST bind to C0/cRaw[0] @ H101 — never cRaw[1]/H102, never spAddr drift.
+  {
+    const bool haveC0 = (UI_C_COUNT > 0) && snap->haveC[0];
+    const uint16_t c0Raw = haveC0 ? snap->cRaw[0] : snap->spRaw;
+    const bool haveSpVal = haveC0 || snap->haveSp;
+    fmtSpLabel(buf, sizeof(buf), c0Raw, haveSpVal);
+    // Runtime bind assert: snap SP/H101 must match C0 when present.
+    if (haveC0 && snap->haveSp && snap->spRaw != snap->cRaw[0]) {
+      Serial.printf("[UI-ASSERT] FAIL SP=%u != C0=%u (H101 bind)\n",
+                    (unsigned)snap->spRaw, (unsigned)snap->cRaw[0]);
+    }
+    if (haveC0 && snap->haveH101 && snap->h101 != snap->cRaw[0]) {
+      Serial.printf("[UI-ASSERT] FAIL H101=%u != C0=%u\n",
+                    (unsigned)snap->h101, (unsigned)snap->cRaw[0]);
+    }
+    if (snap->spAddr != 0 && snap->spAddr != UI_SP_HOLDING) {
+      Serial.printf("[UI-ASSERT] FAIL spAddr=%u want H%u\n",
+                    (unsigned)snap->spAddr, (unsigned)UI_SP_HOLDING);
+    }
   }
   setLabelIfChanged(s_lblSp, s_txtSp, sizeof(s_txtSp), buf);
+
+  // One-shot Serial proof of exact LCD strings + binding (C0↔SP↔H101).
+  if (!s_uiLabelProofPrinted && UI_C_COUNT > 0 && snap->haveC[0]) {
+    s_uiLabelProofPrinted = true;
+    Serial.printf("[UI-LABEL] C0=\"%s\" bind=cRaw[0] H%u raw=%u\n", s_txtC[0],
+                  (unsigned)UI_C_HOLDING(0), (unsigned)snap->cRaw[0]);
+    if (UI_C_COUNT > 1 && snap->haveC[1]) {
+      Serial.printf("[UI-LABEL] C1=\"%s\" bind=cRaw[1] H%u raw=%u\n", s_txtC[1],
+                    (unsigned)UI_C_HOLDING(1), (unsigned)snap->cRaw[1]);
+    }
+    Serial.printf("[UI-LABEL] SP=\"%s\" bind=cRaw[0] H%u (never C1)\n", s_txtSp,
+                  (unsigned)UI_SP_HOLDING);
+    if (snap->haveH100) {
+      Serial.printf("[UI-LABEL] H100 Start/Stop raw=%u (not a C param)\n",
+                    (unsigned)snap->h100);
+    }
+    Serial.printf(
+        "[UI-LABEL] expect C0 SP H101 | C1 hyster H102 | H100 Start | "
+        "SP==C0 raw\n");
+  }
 
   if (snap->haveH100) {
     snprintf(buf, sizeof(buf), "H100 Start/Stop  %u", (unsigned)snap->h100);
@@ -529,17 +685,21 @@ void uiTestUpdateBasic(uint16_t h1, bool haveH1, uint16_t h100, bool haveH100,
                        const char *status) {
   UiTestSnap s = s_last;
   // Compat: h1 historically meant water temp — map to D1 vstup (holding 1).
-  s.inletRaw = h1;
-  s.haveInlet = haveH1;
-  if (s.inletAddr == 0) s.inletAddr = 1;
+  s.dRaw[1] = h1;
+  s.haveD[1] = haveH1;
   s.h100 = h100;
   s.haveH100 = haveH100;
   s.h101 = h101;
   s.haveH101 = haveH101;
+  // H101 = C0/SP (Milan STOP) — feed SP + C0 only; H102 is C1, never SP.
   if (haveH101) {
     s.spRaw = h101;
     s.haveSp = true;
-    if (s.spAddr == 0) s.spAddr = 101;
+    s.spAddr = UI_SP_HOLDING;
+    if (UI_C_COUNT > 0) {
+      s.cRaw[0] = h101;
+      s.haveC[0] = true;
+    }
   }
   s.h13 = h13;
   s.haveH13 = haveH13;
