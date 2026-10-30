@@ -213,7 +213,9 @@ void onSpDownClicked(lv_event_t *e) {
     return;
   }
   s_spDownReq = true;
-  Serial.println(F("SP- tap (UI CLICKED −1 C, C0 int)"));
+  // ± always C0/H101 — never C1/H102 hyster.
+  Serial.printf("SP- tap (UI CLICKED −1 C, C0/H%u int)\n",
+                (unsigned)UI_SP_HOLDING);
 }
 
 void onSpUpClicked(lv_event_t *e) {
@@ -223,7 +225,8 @@ void onSpUpClicked(lv_event_t *e) {
     return;
   }
   s_spUpReq = true;
-  Serial.println(F("SP+ tap (UI CLICKED +1 C, C0 int)"));
+  Serial.printf("SP+ tap (UI CLICKED +1 C, C0/H%u int)\n",
+                (unsigned)UI_SP_HOLDING);
 }
 
 void setLabelIfChanged(lv_obj_t *lbl, char *cache, size_t cacheCap, const char *text) {
@@ -579,6 +582,7 @@ void uiTestUpdate(const UiTestSnap *snap) {
   }
 
   for (int i = 0; i < UI_C_COUNT; i++) {
+    // Label address is ALWAYS UI_C_HOLDING(i)=101+i — value from cRaw[i] only.
     fmtCValue(buf, sizeof(buf), i, snap->cRaw[i], snap->haveC[i]);
     setLabelIfChanged(s_lblC[i], s_txtC[i], sizeof(s_txtC[i]), buf);
   }
@@ -589,6 +593,19 @@ void uiTestUpdate(const UiTestSnap *snap) {
     const uint16_t c0Raw = haveC0 ? snap->cRaw[0] : snap->spRaw;
     const bool haveSpVal = haveC0 || snap->haveSp;
     fmtSpLabel(buf, sizeof(buf), c0Raw, haveSpVal);
+    // Runtime bind assert: snap SP/H101 must match C0 when present.
+    if (haveC0 && snap->haveSp && snap->spRaw != snap->cRaw[0]) {
+      Serial.printf("[UI-ASSERT] FAIL SP=%u != C0=%u (H101 bind)\n",
+                    (unsigned)snap->spRaw, (unsigned)snap->cRaw[0]);
+    }
+    if (haveC0 && snap->haveH101 && snap->h101 != snap->cRaw[0]) {
+      Serial.printf("[UI-ASSERT] FAIL H101=%u != C0=%u\n",
+                    (unsigned)snap->h101, (unsigned)snap->cRaw[0]);
+    }
+    if (snap->spAddr != 0 && snap->spAddr != UI_SP_HOLDING) {
+      Serial.printf("[UI-ASSERT] FAIL spAddr=%u want H%u\n",
+                    (unsigned)snap->spAddr, (unsigned)UI_SP_HOLDING);
+    }
   }
   setLabelIfChanged(s_lblSp, s_txtSp, sizeof(s_txtSp), buf);
 
@@ -597,13 +614,19 @@ void uiTestUpdate(const UiTestSnap *snap) {
     s_uiLabelProofPrinted = true;
     Serial.printf("[UI-LABEL] C0=\"%s\" bind=cRaw[0] H%u raw=%u\n", s_txtC[0],
                   (unsigned)UI_C_HOLDING(0), (unsigned)snap->cRaw[0]);
-    if (UI_C_COUNT > 1) {
+    if (UI_C_COUNT > 1 && snap->haveC[1]) {
       Serial.printf("[UI-LABEL] C1=\"%s\" bind=cRaw[1] H%u raw=%u\n", s_txtC[1],
                     (unsigned)UI_C_HOLDING(1), (unsigned)snap->cRaw[1]);
     }
     Serial.printf("[UI-LABEL] SP=\"%s\" bind=cRaw[0] H%u (never C1)\n", s_txtSp,
                   (unsigned)UI_SP_HOLDING);
-    Serial.printf("[UI-LABEL] expect C0 SP H101 | C1 hyster H102 | SP==C0 raw\n");
+    if (snap->haveH100) {
+      Serial.printf("[UI-LABEL] H100 Start/Stop raw=%u (not a C param)\n",
+                    (unsigned)snap->h100);
+    }
+    Serial.printf(
+        "[UI-LABEL] expect C0 SP H101 | C1 hyster H102 | H100 Start | "
+        "SP==C0 raw\n");
   }
 
   if (snap->haveH100) {

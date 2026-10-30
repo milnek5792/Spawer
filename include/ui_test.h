@@ -13,13 +13,16 @@ extern "C" {
 
 /**
  * Manual table C subset shown on LCD (C0..C11).
- * Holding map (Milan STOP): H100 = Start/Stop (KEEP);
- * C table starts at H101 → C0/SP @ H101, C1 @ H102, … C11 @ H112.
- * SP label + FC16 ± MUST use H101 only — never H102.
+ * Permanent map (Milan FINAL):
+ *   H100 = Start/Stop only (KEEP; not a C param)
+ *   H101 = C0 = SP (± FC16)
+ *   H102 = C1 = hysteresis
+ *   C[i] = holding 101+i
+ * SP label + FC16 ± MUST use H101 / cRaw[0] only — never H102 / cRaw[1].
  */
 #define UI_C_COUNT 12
 
-/** Holding address for Ci (C0→101 … C11→112). */
+/** Holding address for Ci (C0→101 … C11→112). Permanent: 101+i. */
 #define UI_C_HOLDING_BASE 101
 #define UI_C_HOLDING(i) ((uint16_t)(UI_C_HOLDING_BASE + (uint16_t)(i)))
 
@@ -31,6 +34,9 @@ extern "C" {
 #endif
 #if UI_SP_HOLDING != 101
 #error "UI_SP_HOLDING must be 101"
+#endif
+#if (UI_C_HOLDING_BASE + 0) != 101 || (UI_C_HOLDING_BASE + 1) != 102
+#error "C0=H101 C1=H102 required (no off-by-one)"
 #endif
 
 /** Snapshot for flicker-free label refresh (main → UI). */

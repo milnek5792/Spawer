@@ -137,6 +137,7 @@ static const uint16_t MB_C0_ADDR = UI_C_HOLDING_BASE;  // C0 = SP @ H101
 static const uint16_t MB_C_COUNT = UI_C_COUNT;       // C0..C11
 static_assert(MB_SP_ADDR == 101, "SP must be H101 (C0)");
 static_assert(MB_C0_ADDR == 101, "C0 must be H101");
+static_assert(UI_C_HOLDING(0) == 101, "C0 must be H101");
 static_assert(UI_C_HOLDING(1) == 102, "C1 must be H102");
 // Poll: D0..D9; H100 Start + C0..C11 in one FC03 block 100–112.
 static const uint16_t MB_TEMP_BLOCK_START = 0;
@@ -146,6 +147,15 @@ static const uint16_t MB_START_C_BLOCK_QTY = 13;     // 100..112 inclusive
 static const uint16_t MB_BLK_OFF_START = 0;          // vals[0] = H100 Start
 static const uint16_t MB_BLK_OFF_SP = 1;             // vals[1] = H101 C0/SP
 static const uint16_t MB_BLK_OFF_C1 = 2;             // vals[2] = H102 C1 hyst
+// Permanent bind: C[i] holding = 101+i → block offset = holding − 100.
+// NEVER use offset==i (that maps C0→H100 Start, C1→H101 SP — Milan bug).
+static constexpr uint16_t cBlockOff(uint16_t cIndex) {
+  return (uint16_t)(UI_C_HOLDING_BASE + cIndex - MB_START_C_BLOCK_START);
+}
+static_assert(UI_C_HOLDING(0) - 100 == 1, "C0 block off must be 1 (H101)");
+static_assert(UI_C_HOLDING(1) - 100 == 2, "C1 block off must be 2 (H102)");
+static_assert(cBlockOff(0) == 1, "cBlockOff(0) == H101 slot");
+static_assert(cBlockOff(1) == 2, "cBlockOff(1) == H102 slot");
 static const size_t MAX_FRAME = 256;
 static const size_t PROP_LEN_MIN = 70;
 static const size_t PROP_LEN_MAX = 90;
@@ -1219,47 +1229,84 @@ static void absorbTempBlock(const uint16_t *vals) {
 }
 
 // Absorb FC03 holding 100–112 (block MUST start at H100):
-//   vals[0]=H100 Start, vals[1]=H101 C0/SP, vals[2]=H102 C1, … vals[12]=H112 C11.
-// OFF-BY-ONE FIX: C[i] = vals[1+i]  (C0=H101). NEVER C[i]=vals[i] (that maps
-// C0→H100 Start and C1→H101 SP — Milan: C1 shows SP, SP shows H102).
+//   vals[0]=H100 Start, vals[1]=H101 C0/SP, vals[2]=H102 C1 hyster, …
+// PERMANENT: C[i] = vals[cBlockOff(i)] = vals[UI_C_HOLDING(i)-100]
+//   = holding 101+i. NEVER vals[i] (C0←H100, C1←H101 SP — Milan FINAL bug).
 static_assert(MB_BLK_OFF_START == 0, "H100 Start = vals[0]");
 static_assert(MB_BLK_OFF_SP == 1, "H101 C0/SP = vals[1]");
 static_assert(MB_BLK_OFF_C1 == 2, "H102 C1 = vals[2]");
+static_assert(cBlockOff(0) == MB_BLK_OFF_SP, "cBlockOff(0) must be H101 slot");
+static_assert(cBlockOff(1) == MB_BLK_OFF_C1, "cBlockOff(1) must be H102 slot");
+
+/** Every successful 100–112 poll: dump + runtime assert of address→label bind. */
+static void dumpBindMapEachPoll(uint16_t h100, bool okH100, uint16_t c0,
+                                bool okC0, uint16_t c1, bool okC1) {
+  Serial.printf("MAP H100=%s%u | C0=SP=H101=%s%u | C1=H102=%s%u\n",
+                okH100 ? "" : "?", (unsigned)h100, okC0 ? "" : "?",
+                (unsigned)c0, okC1 ? "" : "?", (unsigned)c1);
+  if (okC0) {
+    if (lastSpRaw != c0 || lastH101 != c0 || lastC[0] != c0) {
+      Serial.printf(
+          "MAP_ASSERT FAIL C0/SP/H101 desync C0=%u SP=%u H101=%u lastC0=%u\n",
+          (unsigned)c0, (unsigned)lastSpRaw, (unsigned)lastH101,
+          (unsigned)lastC[0]);
+    }
+    // Off-by-one smell: C0 equal to Start bit (0/1) while C1 looks like SP °C.
+    if (okH100 && okC1 && c0 == h100 && h100 <= 1 && c1 >= MB_SP_MIN_RAW &&
+        c1 <= MB_SP_MAX_RAW) {
+      Serial.println(
+          F("MAP_ASSERT FAIL off-by-one? C0==H100 Start and C1 looks like SP"));
+    }
+  }
+}
+
 static void absorbStartAndCBlock(const uint16_t *vals, uint16_t qty) {
   if (!vals || qty < 1) return;
-  emitHoldingWatch("H100", vals[0], &lastH100, &haveH100);
-  if (qty < 2) return;
 
-  // H101 only — integer °C (manual C0). NOT H102.
-  const uint16_t vC0 = vals[1];
-  const bool c0First = !haveC[0];
-  const bool c0Changed = haveC[0] && lastC[0] != vC0;
+  // H100 Start/Stop ONLY — never feed into C[] / SP.
+  const uint16_t vH100 = vals[MB_BLK_OFF_START];
+  emitHoldingWatch("H100", vH100, &lastH100, &haveH100);
 
+  // Fill C[i] from absolute holding 101+i (block offset via cBlockOff).
   for (uint16_t i = 0; i < MB_C_COUNT; i++) {
-    // Explicit 1+i — Start occupies vals[0].
-    const uint16_t idx = (uint16_t)(1u + i);
+    const uint16_t idx = cBlockOff(i);
     if (idx >= qty) break;
     char tag[8];
     snprintf(tag, sizeof(tag), "C%u", (unsigned)i);
     emitHoldingWatchQuiet(tag, vals[idx], &lastC[i], &haveC[i]);
   }
 
-  lastH101 = vC0;
-  haveH101 = true;
-  lastSpRaw = vC0;
-  haveSp = true;
-  // C0 already set in loop from vals[1]; re-assert so SP± cannot drift to H102.
-  if (MB_C_COUNT > 0) {
+  // C0 = SP = H101 only (NOT H102 / C1 hyster).
+  bool okC0 = false;
+  bool okC1 = false;
+  uint16_t vC0 = 0;
+  uint16_t vC1 = 0;
+  if (qty > MB_BLK_OFF_SP) {
+    vC0 = vals[MB_BLK_OFF_SP];
+    lastH101 = vC0;
+    haveH101 = true;
+    lastSpRaw = vC0;
+    haveSp = true;
     lastC[0] = vC0;
     haveC[0] = true;
+    okC0 = true;
+    // Runtime: slot used for C0 must be H101 word.
+    if (cBlockOff(0) != MB_BLK_OFF_SP || vals[cBlockOff(0)] != vC0) {
+      Serial.println(F("MAP_ASSERT FAIL C0 slot != H101"));
+    }
+  }
+  if (qty > MB_BLK_OFF_C1 && MB_C_COUNT > 1) {
+    vC1 = vals[MB_BLK_OFF_C1];
+    lastC[1] = vC1;
+    haveC[1] = true;
+    okC1 = true;
+    if (cBlockOff(1) != MB_BLK_OFF_C1) {
+      Serial.println(F("MAP_ASSERT FAIL C1 slot != H102"));
+    }
   }
 
-  // Serial proof: C0= must match H101= (same raw). SP± uses this word only.
-  // First sample + CHANGE — not every quiet poll.
-  if (c0First || c0Changed) {
-    Serial.printf("H101=%u C0=%u SP=%u\n", (unsigned)vC0, (unsigned)vC0,
-                  (unsigned)vC0);
-  }
+  // Milan FINAL: assert/Serial dump EACH poll — C0/SP/H101, C1/H102, H100.
+  dumpBindMapEachPoll(vH100, true, vC0, okC0, vC1, okC1);
 }
 
 // Legacy single-word path — H101 is C0/SP (Milan STOP), never H102.
@@ -1284,11 +1331,12 @@ static void pushUiSnap(const char *status) {
     s.dRaw[i] = lastD[i];
     s.haveD[i] = haveD[i];
   }
+  // C[i] already bound to holding 101+i in absorb — copy as-is.
   for (uint16_t i = 0; i < UI_C_COUNT && i < MB_C_COUNT; i++) {
     s.cRaw[i] = lastC[i];
     s.haveC[i] = haveC[i];
   }
-  // SP± and H101 MUST equal C0 (vals[1]/H101). Never C1 / lastC[1] / H102.
+  // SP widget + H101 mirror C0 only. NEVER lastC[1] / H102 hyster.
   if (haveC[0]) {
     lastSpRaw = lastC[0];
     haveSp = true;
@@ -1296,9 +1344,9 @@ static void pushUiSnap(const char *status) {
     haveH101 = true;
   }
   s.spRaw = haveC[0] ? lastC[0] : lastSpRaw;
-  s.spAddr = MB_SP_ADDR;  // always 101 — FC16 ± only here
+  s.spAddr = MB_SP_ADDR;  // hard 101 — FC16 ± only here
   s.haveSp = haveSp || haveC[0];
-  s.h100 = lastH100;
+  s.h100 = lastH100;  // Start/Stop — not a C param
   s.haveH100 = haveH100;
   s.h101 = haveC[0] ? lastC[0] : lastH101;
   s.haveH101 = haveH101 || haveC[0];
@@ -2379,18 +2427,28 @@ static void runSpWriteRaw(uint16_t raw, bool fromUi) {
 }
 
 static void runSpStep(int deltaSteps, bool fromUi) {
-  if (!haveSp) {
-    Serial.println(F("SP step skipped — no SP reading yet"));
-    uiTestSetStatus("SP? — wait for poll…");
+  // SP ± MUST step C0 @ H101 — prefer lastC[0]; never lastC[1]/H102.
+  if (haveC[0]) {
+    lastSpRaw = lastC[0];
+    haveSp = true;
+    lastH101 = lastC[0];
+    haveH101 = true;
+  }
+  if (!haveSp && !haveC[0]) {
+    Serial.println(F("SP step skipped — no C0/H101 reading yet"));
+    uiTestSetStatus("SP? — wait for C0/H101…");
     return;
   }
-  int32_t next = (int32_t)lastSpRaw + (int32_t)deltaSteps * (int32_t)MB_SP_STEP_RAW;
+  const uint16_t cur = haveC[0] ? lastC[0] : lastSpRaw;
+  int32_t next = (int32_t)cur + (int32_t)deltaSteps * (int32_t)MB_SP_STEP_RAW;
   if (next < (int32_t)MB_SP_MIN_RAW) next = MB_SP_MIN_RAW;
   if (next > (int32_t)MB_SP_MAX_RAW) next = MB_SP_MAX_RAW;
-  if ((uint16_t)next == lastSpRaw) {
+  if ((uint16_t)next == cur) {
     uiTestSetStatus("SP at limit");
     return;
   }
+  Serial.printf("SP± from C0/H%u %u → %u (FC16; not H102)\n",
+                (unsigned)MB_SP_ADDR, (unsigned)cur, (unsigned)next);
   runSpWriteRaw((uint16_t)next, fromUi);
 }
 
@@ -3076,19 +3134,20 @@ void setup() {
 
   Serial.println();
   Serial.println(F("=== Spawer RS485 + LCD (C0 SP H101 ± FC16; C1 hyster H102; H100 Start) ==="));
-  // Distinctive label-map proof — LCD must show "C0 SP H101" / "C1 hyster H102".
-  Serial.println(F("FW: force-c0-h101-labels — LCD C0 SP H101 | C1 hyster H102 | SP=cRaw[0]"));
+  // Permanent bind proof — each poll prints MAP H100= | C0=SP=H101= | C1=H102=
+  Serial.println(F("FW: c-h-bind-permanent — C[i]=H(101+i); MAP dump each poll"));
   Serial.println(F("D scale: manual no tenths stated; wire D0/D2/D3 x0.1 live, D1 int Milan"));
   Serial.printf("Board: Waveshare ESP32-S3-Touch-LCD-7B (USB CDC)\n");
   Serial.printf("Bus UART: RX=GPIO%d TX=GPIO%d (auto DE/RE) @ %lu 8N1\n",
                 RS485_RX_PIN, RS485_TX_PIN, (unsigned long)busBaud);
   Serial.printf(
-      "D0=H%u..D9 (D1 int) | C0 SP H%u | C1 hyster H102 | Start=H%u KEEP\n",
-      (unsigned)MB_D0_AMBIENT_ADDR, (unsigned)MB_SP_ADDR,
-      (unsigned)MB_H100_START_ADDR);
-  Serial.println(F("Quiet: D=/C=/SP=/H100= + H13 bits= + SP_SET / H100_START"));
+      "BIND C0=H%u SP | C1=H%u hyster | Start=H%u | cBlockOff(0)=%u cBlockOff(1)=%u\n",
+      (unsigned)UI_C_HOLDING(0), (unsigned)UI_C_HOLDING(1),
+      (unsigned)MB_H100_START_ADDR, (unsigned)cBlockOff(0),
+      (unsigned)cBlockOff(1));
+  Serial.println(F("Quiet: MAP each poll + D=/C=/H100= + H13 bits= + SP_SET / H100_START"));
   Serial.println(F("FC16 H100 Start/Stop KEEP + FC16 H101 C0/SP int; H102≠SP."));
-  Serial.println(F("LCD labels: C0 SP H101 | C1 hyster H102 | SP widget=cRaw[0] only."));
+  Serial.println(F("LCD labels: C0 SP H101 | C1 hyster H102 | SP±=cRaw[0]/H101 only."));
   Serial.println(F("SCANFC = Serial-only. H13=64 bits=6 ≈ panel err 6."));
   Serial.println(F("BOOT 7B = download. TO → A<->B. REFLASH: pio run -t upload."));
   printHelp();
