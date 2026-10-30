@@ -3076,6 +3076,8 @@ void setup() {
 
   Serial.println();
   Serial.println(F("=== Spawer RS485 + LCD (SP=C0=H101 ± FC16; C1=H102; H100 Start) ==="));
+  // Distinctive PR#14 proof — old flashes lack this line.
+  Serial.println(F("FW: a32941c PR14 absorb C[i]=vals[1+i] (C0=H101=SP)"));
   Serial.println(F("D scale: manual no tenths stated; wire D0/D2/D3 x0.1 live, D1 int Milan"));
   Serial.printf("Board: Waveshare ESP32-S3-Touch-LCD-7B (USB CDC)\n");
   Serial.printf("Bus UART: RX=GPIO%d TX=GPIO%d (auto DE/RE) @ %lu 8N1\n",
