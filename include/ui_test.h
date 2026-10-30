@@ -1,4 +1,4 @@
-// ui_test.h — Spawer op-test LVGL UI (D0–D9 + C0–C11 + SP H101 int °C + H100 Start + H13)
+// ui_test.h — Spawer op-test LVGL UI (D0–D9 + C0–C11 + SP=C0@H101 + H100 Start + H13)
 #pragma once
 
 #include <stdint.h>
@@ -15,9 +15,16 @@ extern "C" {
  * Manual table C subset shown on LCD (C0..C11).
  * Holding map (Milan STOP): H100 = Start/Stop (KEEP);
  * C table starts at H101 → C0/SP @ H101, C1 @ H102, … C11 @ H112.
- * Do NOT treat H102 as SP.
+ * SP label + FC16 ± MUST use H101 only — never H102.
  */
 #define UI_C_COUNT 12
+
+/** Holding address for Ci (C0→101 … C11→112). */
+#define UI_C_HOLDING_BASE 101
+#define UI_C_HOLDING(i) ((uint16_t)(UI_C_HOLDING_BASE + (uint16_t)(i)))
+
+/** Holding for C0 / SP (same as UI_C_HOLDING(0)). */
+#define UI_SP_HOLDING UI_C_HOLDING_BASE
 
 /** Snapshot for flicker-free label refresh (main → UI). */
 typedef struct UiTestSnap {
