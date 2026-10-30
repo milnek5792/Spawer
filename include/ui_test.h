@@ -1,4 +1,4 @@
-// ui_test.h — Spawer op-test LVGL UI (D0–D9 grid + SP H101 ±0.5 + H13 + START/STOP)
+// ui_test.h — Spawer op-test LVGL UI (D0–D9 + C0–C11 + SP H101 int °C + H100 Start + H13)
 #pragma once
 
 #include <stdint.h>
@@ -11,15 +11,26 @@ extern "C" {
 /** Manual table D count (holding 0..9). */
 #define UI_D_COUNT 10
 
+/**
+ * Manual table C subset shown on LCD (C0..C11).
+ * Holding map (project): H100 = Start/Stop (NOT a C param);
+ * C0..C11 → holding 101..112 (C0 = SP).
+ */
+#define UI_C_COUNT 12
+
 /** Snapshot for flicker-free label refresh (main → UI). */
 typedef struct UiTestSnap {
   /** D0..D9 raw holdings (manual table from address 0). */
   uint16_t dRaw[UI_D_COUNT];
   bool haveD[UI_D_COUNT];
-  /** Setpoint (holding 101; FC16 writable). */
+  /** C0..C11 raw holdings (integer °C / 0-1 flags per manual C). */
+  uint16_t cRaw[UI_C_COUNT];
+  bool haveC[UI_C_COUNT];
+  /** Setpoint = C0 = holding 101; integer °C (manual C0), FC16 writable. */
   uint16_t spRaw;
   uint16_t spAddr;
   bool haveSp;
+  /** Start/Stop holding 100 (FC16); keep — do not relocate. */
   uint16_t h100;
   bool haveH100;
   uint16_t h101;
@@ -40,7 +51,7 @@ void uiTestTick(void);
 void uiTestUpdate(const UiTestSnap *snap);
 
 /**
- * Compat helper: sets D1 from h1; keeps last D values / SP unless updated via uiTestUpdate.
+ * Compat helper: sets D1 from h1; keeps last D/C/SP unless updated via uiTestUpdate.
  */
 void uiTestUpdateBasic(uint16_t h1, bool haveH1, uint16_t h100, bool haveH100,
                        uint16_t h101, bool haveH101, uint16_t h13, bool haveH13,
@@ -52,10 +63,10 @@ bool uiTestConsumeStartRequest(void);
 /** True once after STOP button press (debounced; blocked while write busy). */
 bool uiTestConsumeStopRequest(void);
 
-/** True once after SP − (0.5 °C) button. */
+/** True once after SP − (1 °C integer, manual C0) button. */
 bool uiTestConsumeSpDownRequest(void);
 
-/** True once after SP + (0.5 °C) button. */
+/** True once after SP + (1 °C integer, manual C0) button. */
 bool uiTestConsumeSpUpRequest(void);
 
 /**
