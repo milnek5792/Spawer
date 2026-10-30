@@ -1,4 +1,4 @@
-// ui_test.h — Spawer op-test LVGL UI (D0–D3 + SP H101 ±0.5 + H13 + START/STOP)
+// ui_test.h — Spawer op-test LVGL UI (D0–D9 grid + SP H101 ±0.5 + H13 + START/STOP)
 #pragma once
 
 #include <stdint.h>
@@ -8,24 +8,14 @@
 extern "C" {
 #endif
 
+/** Manual table D count (holding 0..9). */
+#define UI_D_COUNT 10
+
 /** Snapshot for flicker-free label refresh (main → UI). */
 typedef struct UiTestSnap {
-  /** D0 Okolní teplota (holding 0). */
-  uint16_t ambientRaw;
-  uint16_t ambientAddr;
-  bool haveAmbient;
-  /** D2 Výstupní teplota vody (holding 2). */
-  uint16_t outletRaw;
-  uint16_t outletAddr;
-  bool haveOutlet;
-  /** D1 Teplota vstupní vody (holding 1). */
-  uint16_t inletRaw;
-  uint16_t inletAddr;
-  bool haveInlet;
-  /** D3 Teplota cívky (holding 3). */
-  uint16_t coilRaw;
-  uint16_t coilAddr;
-  bool haveCoil;
+  /** D0..D9 raw holdings (manual table from address 0). */
+  uint16_t dRaw[UI_D_COUNT];
+  bool haveD[UI_D_COUNT];
   /** Setpoint (holding 101; FC16 writable). */
   uint16_t spRaw;
   uint16_t spAddr;
@@ -50,7 +40,7 @@ void uiTestTick(void);
 void uiTestUpdate(const UiTestSnap *snap);
 
 /**
- * Compat helper: outlet ← h1; keeps last inlet/SP unless updated via uiTestUpdate.
+ * Compat helper: sets D1 from h1; keeps last D values / SP unless updated via uiTestUpdate.
  */
 void uiTestUpdateBasic(uint16_t h1, bool haveH1, uint16_t h100, bool haveH100,
                        uint16_t h101, bool haveH101, uint16_t h13, bool haveH13,
